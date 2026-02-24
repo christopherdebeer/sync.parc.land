@@ -1,0 +1,14 @@
+{
+  "tasks": {
+    "vt": "deno run -A jsr:@valtown/vt",
+    "vt:clone": "deno run -A jsr:@valtown/vt clone c15r/agent-sync ./vt-project",
+    "vt:push": "cd vt-project && deno run -A jsr:@valtown/vt push",
+    "vt:pull": "cd vt-project && deno run -A jsr:@valtown/vt pull",
+    "vt:watch": "cd vt-project && deno run -A jsr:@valtown/vt watch",
+    "vt:status": "cd vt-project && deno run -A jsr:@valtown/vt status",
+    "deploy": "deno run -A scripts/deploy.ts"
+  },
+  "imports": {
+    "@valtown/vt": "jsr:@valtown/vt"
+  }
+}
