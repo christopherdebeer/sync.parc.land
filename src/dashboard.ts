@@ -192,6 +192,52 @@ export function dashboardHTML(roomId: string, baseUrl: string) {
   .summary-bar .stat .label { color: var(--dim); }
 
   .empty { color: var(--dim); font-style: italic; padding: 1rem; text-align: center; }
+
+  /* Timer & enabled badges */
+  .timer-badge {
+    display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px;
+    background: rgba(210,153,34,0.15); color: var(--yellow); margin-left: 4px;
+    font-weight: 500; vertical-align: middle;
+  }
+  .timer-badge.expired { background: rgba(248,81,73,0.15); color: var(--red); }
+  .timer-badge.dormant { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .enabled-badge {
+    display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px;
+    background: rgba(188,140,255,0.15); color: var(--purple); margin-left: 4px;
+    font-weight: 500; vertical-align: middle; max-width: 200px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* Actions */
+  .action-list { display: flex; flex-direction: column; gap: 0.5rem; }
+  .action-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.6rem 0.8rem;
+  }
+  .action-card .action-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  }
+  .action-card .action-id { color: var(--orange); font-weight: 600; font-size: 13px; }
+  .action-card .action-scope {
+    font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    background: rgba(210,153,34,0.15); color: var(--yellow);
+  }
+  .action-card .action-scope.shared { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .action-card .action-scope.agent { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .action-card .action-meta { font-size: 11px; color: var(--dim); }
+  .action-card .action-if { font-size: 11px; color: var(--purple); font-style: italic; margin-top: 2px; }
+  .action-card .action-writes { font-size: 11px; color: var(--dim); margin-top: 4px; }
+  .action-card .action-write-item { color: var(--green); }
+  .action-card .action-params { margin-top: 4px; font-size: 11px; }
+  .action-card .action-params .param-name { color: var(--accent); }
+  .action-card .action-params .param-type { color: var(--dim); }
+  .action-card .action-cooldown { font-size: 10px; color: var(--yellow); margin-top: 2px; }
+  .action-avail {
+    display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    font-weight: 600;
+  }
+  .action-avail.yes { background: rgba(63,185,80,0.15); color: var(--green); }
+  .action-avail.no { background: rgba(248,81,73,0.15); color: var(--red); }
 </style>
 </head>
 <body>
@@ -213,6 +259,7 @@ export function dashboardHTML(roomId: string, baseUrl: string) {
   <button class="tab active" data-tab="agents">Agents <span class="badge" id="agent-count">0</span></button>
   <button class="tab" data-tab="messages">Messages <span class="badge" id="msg-count">0</span></button>
   <button class="tab" data-tab="state">State <span class="badge" id="state-count">0</span></button>
+  <button class="tab" data-tab="actions">Actions <span class="badge" id="action-count">0</span></button>
   <button class="tab" data-tab="cel">CEL Console</button>
 </div>
 
@@ -226,6 +273,10 @@ export function dashboardHTML(roomId: string, baseUrl: string) {
 
 <div class="panel" id="panel-state">
   <div id="state"><div class="empty">no state</div></div>
+</div>
+
+<div class="panel" id="panel-actions">
+  <div id="actions" class="action-list"><div class="empty">no actions</div></div>
 </div>
 
 <div class="panel" id="panel-cel">
@@ -244,6 +295,7 @@ export function dashboardHTML(roomId: string, baseUrl: string) {
     <span style="cursor:pointer;color:var(--purple)" onclick="quickCel('state._view')">_view</span> ·
     <span style="cursor:pointer;color:var(--accent)" onclick="quickCel('agents')">agents</span> ·
     <span style="cursor:pointer;color:var(--accent)" onclick="quickCel('messages')">messages</span> ·
+    <span style="cursor:pointer;color:var(--orange)" onclick="quickCel('actions')">actions</span> ·
     <span style="cursor:pointer;color:var(--accent)" onclick="quickCel('state')">all state</span>
   </div>
 </div>
@@ -329,6 +381,36 @@ function kindClass(kind) {
   const map = { task: 'kind-task', result: 'kind-result', proposal: 'kind-proposal',
     vote: 'kind-vote', correction: 'kind-correction', error: 'kind-error', synthesis: 'kind-synthesis' };
   return map[kind] || '';
+}
+
+function timerBadge(item) {
+  if (!item.timer_json && !item.timer_expires_at && !item.timer_ticks_left) return '';
+  const parts = [];
+  if (item.timer_effect) parts.push(item.timer_effect);
+  if (item.timer_expires_at) {
+    const exp = new Date(item.timer_expires_at);
+    const now = Date.now();
+    if (exp.getTime() < now) {
+      parts.push('expired');
+      return '<span class="timer-badge expired" title="' + esc(item.timer_expires_at) + '">' + parts.join(' ') + '</span>';
+    }
+    const secsLeft = Math.round((exp.getTime() - now) / 1000);
+    parts.push(secsLeft + 's left');
+  }
+  if (item.timer_ticks_left != null) {
+    parts.push(item.timer_ticks_left + ' ticks');
+    if (item.timer_tick_on) parts.push('on ' + item.timer_tick_on);
+  }
+  if (parts.length === 0 && item.timer_json) {
+    try { const t = JSON.parse(item.timer_json); parts.push(JSON.stringify(t)); } catch {}
+  }
+  const cls = item.timer_effect === 'enable' ? 'dormant' : '';
+  return '<span class="timer-badge ' + cls + '" title="' + esc(item.timer_json || '') + '">' + esc(parts.join(' | ')) + '</span>';
+}
+
+function enabledBadge(item) {
+  if (!item.enabled_expr) return '';
+  return '<span class="enabled-badge" title="' + esc(item.enabled_expr) + '">if: ' + esc(item.enabled_expr) + '</span>';
 }
 
 // ── JSON Tree Renderer ──
@@ -483,6 +565,7 @@ function renderMessages() {
         (m.to_agent ? '<span class="to-badge">→' + esc(agentName(m.to_agent)) + '</span> ' : '') +
         (isThread ? '<span class="reply-badge">↩' + m.reply_to + '</span> ' : '') +
         (m.claimed_by ? '<span class="claim-badge">✓ ' + esc(agentName(m.claimed_by)) + '</span> ' : '') +
+        timerBadge(m) +
         '<span class="msg-body-text">' + esc(truncBody) + '</span>' +
       '</div>' +
       '<div class="meta">#' + m.id + ' · ' + esc(relTime(m.created_at)) + '</div>' +
@@ -547,8 +630,11 @@ function renderState(states) {
       let resolvedVal = null;
       if (scope === '_view') {
         try {
-          const parsed = JSON.parse(s.value);
-          if (parsed && parsed._cel_expr) {
+          const parsed = typeof s.value === 'object' ? s.value : JSON.parse(s.value);
+          if (parsed && parsed.computed && parsed.expr) {
+            viewExpr = parsed.expr;
+            resolvedVal = s.resolved_value;
+          } else if (parsed && parsed._cel_expr) {
             viewExpr = parsed._cel_expr;
             resolvedVal = s.resolved_value;
           }
@@ -556,7 +642,7 @@ function renderState(states) {
       }
 
       html += '<div class="state-row' + (changed ? ' flash-row' : '') + '">';
-      html += '<div class="key">' + esc(s.key) + '</div>';
+      html += '<div class="key">' + esc(s.key) + timerBadge(s) + enabledBadge(s) + '</div>';
 
       if (viewExpr) {
         html += '<div class="view-detail">';
@@ -586,6 +672,62 @@ window.toggleScope = function(scope) {
   }
   if (lastStates) renderState(lastStates);
 };
+
+// ── Actions ──
+let lastActions = [];
+function renderActions(actions) {
+  const el = document.getElementById('actions');
+  const countEl = document.getElementById('action-count');
+  if (!actions || actions.length === 0) { el.innerHTML = '<div class="empty">no actions</div>'; countEl.textContent = '0'; return; }
+  countEl.textContent = actions.length;
+  lastActions = actions;
+
+  el.innerHTML = actions.map(a => {
+    const scopeCls = a.scope === '_shared' ? 'shared' : 'agent';
+    let html = '<div class="action-card">';
+    html += '<div class="action-header">';
+    html += '<span class="action-id">' + esc(a.id) + '</span>';
+    html += '<span class="action-scope ' + scopeCls + '">' + esc(a.scope) + '</span>';
+    html += '<span class="action-avail ' + (a.available !== false ? 'yes' : 'no') + '">' + (a.available !== false ? 'available' : 'unavailable') + '</span>';
+    html += '</div>';
+    if (a.registered_by) html += '<div class="action-meta">by ' + esc(agentName(a.registered_by)) + ' · v' + (a.version || 1) + ' · ' + esc(relTime(a.created_at)) + '</div>';
+    if (a.if) html += '<div class="action-if">if: ' + esc(a.if) + '</div>';
+    if (a.enabled_expr) html += '<div class="action-if">enabled: ' + esc(a.enabled_expr) + '</div>';
+
+    // Params
+    if (a.params && Object.keys(a.params).length > 0) {
+      html += '<div class="action-params">';
+      for (const [name, schema] of Object.entries(a.params)) {
+        html += '<span class="param-name">' + esc(name) + '</span>';
+        html += '<span class="param-type">: ' + esc(schema.type || 'any');
+        if (schema.enum) html += ' [' + schema.enum.map(e => esc(e)).join(', ') + ']';
+        html += '</span> ';
+      }
+      html += '</div>';
+    }
+
+    // Writes
+    if (a.writes && a.writes.length > 0) {
+      html += '<div class="action-writes">writes: ';
+      html += a.writes.map(w => '<span class="action-write-item">' + esc((w.scope || '_shared') + '.' + w.key) + '</span>').join(', ');
+      html += '</div>';
+    }
+
+    // Cooldown / on_invoke timer
+    if (a.on_invoke && a.on_invoke.timer) {
+      const t = a.on_invoke.timer;
+      html += '<div class="action-cooldown">cooldown: ' + (t.ms ? t.ms + 'ms' : JSON.stringify(t)) + '</div>';
+    }
+
+    // Timer on action itself
+    if (a.timer_json || a.timer_expires_at || a.timer_ticks_left) {
+      html += '<div class="action-cooldown">' + timerBadge(a) + '</div>';
+    }
+
+    html += '</div>';
+    return html;
+  }).join('');
+}
 
 // ── CEL Console ──
 async function runCel(expr) {
@@ -641,7 +783,7 @@ function renderCelHistory() {
 }
 
 // ── Summary ──
-function renderSummary(agents, messages, states) {
+function renderSummary(agents, messages, states, actions) {
   const el = document.getElementById('summary');
   const active = (agents || []).filter(a => a.status === 'active').length;
   const waiting = (agents || []).filter(a => a.status === 'waiting').length;
@@ -649,6 +791,8 @@ function renderSummary(agents, messages, states) {
   const claimed = (messages || []).filter(m => m.claimed_by).length;
   const scopeCount = new Set((states || []).map(s => s.scope)).size;
   const views = (states || []).filter(s => s.scope === '_view').length;
+  const timedState = (states || []).filter(s => s.timer_json || s.timer_expires_at).length;
+  const actionCount = (actions || []).length;
 
   el.innerHTML =
     '<div class="stat"><span class="num">' + (agents||[]).length + '</span><span class="label">agents</span></div>' +
@@ -658,7 +802,9 @@ function renderSummary(agents, messages, states) {
     '<div class="stat"><span class="num">' + (messages||[]).length + '</span><span class="label">msgs</span></div>' +
     (claimed ? '<div class="stat"><span class="num">' + claimed + '</span><span class="label">claimed</span></div>' : '') +
     '<div class="stat"><span class="num">' + scopeCount + '</span><span class="label">scopes</span></div>' +
-    (views ? '<div class="stat" style="color:var(--purple)"><span class="num">' + views + '</span><span class="label">views</span></div>' : '');
+    (views ? '<div class="stat" style="color:var(--purple)"><span class="num">' + views + '</span><span class="label">views</span></div>' : '') +
+    (actionCount ? '<div class="stat" style="color:var(--orange)"><span class="num">' + actionCount + '</span><span class="label">actions</span></div>' : '') +
+    (timedState ? '<div class="stat" style="color:var(--yellow)"><span class="num">' + timedState + '</span><span class="label">timed</span></div>' : '');
 }
 
 // ── Polling ──
@@ -666,10 +812,11 @@ async function poll() {
   const pulse = document.getElementById('pulse');
   const status = document.getElementById('poll-status');
   try {
-    const [agents, msgs, state] = await Promise.all([
+    const [agents, msgs, state, actions] = await Promise.all([
       api('/rooms/' + ROOM + '/agents'),
       api('/rooms/' + ROOM + '/messages?after=' + msgCursor + '&limit=200'),
       api('/rooms/' + ROOM + '/state?resolve=true'),
+      api('/rooms/' + ROOM + '/actions'),
     ]);
 
     renderAgents(agents);
@@ -683,7 +830,8 @@ async function poll() {
     }
 
     if (state) renderState(state);
-    renderSummary(agents, allMessages, state);
+    renderActions(actions);
+    renderSummary(agents, allMessages, state, actions);
 
     pulse.className = 'dot';
     status.textContent = 'live · ' + allMessages.length + ' msgs';
