@@ -1,0 +1,14 @@
+# Val Town CLI working directories
+vt-project/
+.vt-deploy/
+
+# Deno
+.deno/
+
+# Environment / secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
