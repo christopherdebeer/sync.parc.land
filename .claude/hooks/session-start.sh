@@ -6,6 +6,13 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
+# Run asynchronously (5 min timeout) — session starts immediately while this runs
+echo '{"async": true, "asyncTimeout": 300000}'
+
+# Signal file so Claude knows when setup is done
+SETUP_DONE_FILE="/tmp/.session-setup-complete"
+rm -f "$SETUP_DONE_FILE"
+
 DENO_DIR="/root/.deno"
 DENO_BIN="$DENO_DIR/bin/deno"
 
@@ -36,4 +43,6 @@ if [ -f "$CLAUDE_PROJECT_DIR/deno.json" ]; then
   deno install 2>/dev/null || true
 fi
 
+# Write completion marker so Claude can check
+echo "done" > "$SETUP_DONE_FILE"
 echo "Session setup complete: Deno $(deno --version | grep -oP 'deno \K[^ ]+'  2>/dev/null || echo '?'), vt ready"
