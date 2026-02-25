@@ -1,4 +1,4 @@
-# Ergonomics Findings — dark-room-v3
+# Ergonomics Findings — dark-room v3 & v4
 
 Observations from running two Claude agents (narrator + player) against
 sync.parc.land v5, using the proactive world-building pattern.
@@ -117,7 +117,7 @@ budgets.** The deadlock made this worse, but even without deadlock, waiting
 
 ---
 
-## Recommendations for v4
+## Recommendations (from v3)
 
 1. **Remove turn-counter waits from player prompt.** Player should: read →
    act → read → act. Never block.
@@ -131,3 +131,106 @@ budgets.** The deadlock made this worse, but even without deadlock, waiting
    Player can check `narrator_seq` to know if the narrator has caught up.
 6. **Accept async rhythm** for the game — strict turn-taking isn't needed and
    the natural async feel adds to the atmosphere.
+
+---
+
+## v4 Results (deadlock fixes applied)
+
+### Changes from v3
+- Player uses read→act→sleep(8s)→repeat loop. **No `wait` endpoint at all.**
+- Narrator registers ALL phase actions upfront (dark, light, outside, settlement)
+- Narrator uses `after=N` on messages scope (not turn counter)
+- Working timer and action examples in prompts
+- Background tasks explicitly banned
+
+### What improved
+
+**Deadlock eliminated.** Player reached outside (turn 8) without stalling.
+The read→act→sleep loop is reliable — the player never blocked waiting for
+the narrator. v3 deadlocked at turn 10; v4 kept flowing.
+
+**Upfront action registration worked perfectly.** The narrator registered
+search_room, stoke_fire, examine_door, open_door, gather_wood, explore_path,
+build_shelter, return_inside — ALL in the first 3-4 iterations. These appeared
+automatically as conditions were met. The player progressed through 4 phases
+(dark → ember → lit room → outside) and always had actions available.
+
+**Atmospheric timers.** The narrator successfully set `distant_howl` as a
+dormant timer state key that enabled after 60s. Dynamic world events work.
+
+**Player had in-character moments.** "scratches on the outside. something
+wanted in." — the player noticed lore details and spoke in character.
+
+### New issues found in v4
+
+#### 6. CEL scope inconsistency — `messages.count` vs `state._shared.*`
+The narrator used `state._messages.count > 1` which **never triggers**. The
+correct expression is `messages.count > 1` (top-level, no `state.` prefix).
+But all state references use `state._shared.*`, so agents naturally assume
+messages follow the same pattern.
+
+**Impact**: Narrator's wait loop never fired. It only reacted on 20s timeouts,
+wasting iterations and delaying narrative responses.
+
+**Fix**: Either make `state._messages.count` work, or document the exception
+prominently. Better: have the API return a clear error when an expression
+references an invalid path.
+
+#### 7. View CEL fails on missing keys
+The narrator registered a surroundings view with:
+```
+state._shared.shelter_built == true ? "..." : "..."
+```
+But `shelter_built` didn't exist as a state key yet. CEL threw:
+`No such key: shelter_built`
+
+**Impact**: The `surroundings` view returned an error object instead of a
+string. The player could still function (it used `status` view instead) but
+lost its primary orientation tool for the outside phase.
+
+**Fix**: Seed all keys referenced in CEL expressions before registering views,
+OR use CEL's `has()` macro: `has(state._shared.shelter_built) && state._shared.shelter_built == true`.
+
+#### 8. Duplicate narrator events
+The narrator posted the open_door reaction twice with slightly different text:
+- "cold air rushes in. beyond the door: a forest clearing under a pale sky. snow."
+- "cold air rushes in. a forest clearing under pale sky. snow on the ground."
+
+**Cause**: The narrator's wait timed out, it read messages, reacted, then its
+wait loop triggered again on the same batch. No dedup.
+
+**Fix**: Narrator should track the last message sort_key it reacted to and
+skip already-processed messages.
+
+#### 9. Iteration budget is the real constraint
+Each player game turn costs ~5 tool calls (3 reads + 1 invoke + 1 sleep).
+With 25 max turns and multi-call turns, the player got through 8 game turns.
+The narrator used ~44 tool calls total.
+
+| Agent | Tool calls | Game turns covered | Efficiency |
+|-------|-----------|-------------------|------------|
+| v3 narrator | 44 | 10 (then deadlock) | ~4.4 calls/turn |
+| v3 player | 29 | 10 (then deadlock) | ~2.9 calls/turn |
+| v4 narrator | ~40 | 8 (still going) | ~5 calls/turn |
+| v4 player | ~38 | 8 (budget limit) | ~4.8 calls/turn |
+
+**Fix options**:
+- Batch reads: read views+messages+actions in a single tool call (pipe 3 curls)
+- Reduce sleep from 8s to 3-4s
+- Player could skip reads when nothing has changed (check message count first)
+- Increase max_turns
+
+---
+
+## v3 → v4 Summary
+
+| Issue | v3 | v4 |
+|-------|----|----|
+| Turn-counter deadlock | CRITICAL — game stalled | FIXED — no waits |
+| Background task overhead | Wasted ~7 iterations | FIXED — banned |
+| Narrator pre-builds world | Late, after errors | FIXED — all upfront |
+| Timer API error | Broke proactive building | Partially fixed (example worked) |
+| CEL scope inconsistency | N/A | NEW — messages.count vs state.* |
+| View missing keys | N/A | NEW — shelter_built error |
+| Iteration budget | Wasted on waits | Tight but productive |
+| Game progression | Dark→outside, stalled | Dark→outside, budget limit |
