@@ -1,34 +1,50 @@
-# Claude Code Project Instructions
+# sync.parc.land
 
-## Session Setup (async)
+This repo has no local source code. The sync service is deployed remotely.
 
-A SessionStart hook installs Deno and the `vt` CLI in the background when a new
-remote session begins. If you need `deno` or `vt` and they aren't available yet,
-check for the completion marker:
+## Using the API
+
+Interact with **https://sync.parc.land/** directly via `curl`.
+
+### Documentation
+
+Full API docs are served as `text/plain` markdown at the root:
 
 ```bash
-# Wait for setup to finish (if still running)
-while [ ! -f /tmp/.session-setup-complete ]; do sleep 1; done
+curl -s https://sync.parc.land/
 ```
 
-After setup completes, `deno` and `vt` are on PATH and ready to use.
+Read this first whenever you need a refresher on endpoints, auth, CEL
+expressions, actions, views, timers, or any other feature. The root response
+is the canonical reference — do not rely on cached or stale knowledge.
 
-## Project Overview
+### Quick reference
 
-This repo is the GitHub source-of-truth for the Val Town project
-[c15r/agent-sync](https://www.val.town/x/c15r/agent-sync), deployed at
-`https://sync.parc.land/`. It's a thin SQLite sync layer for agent collaboration.
+| Operation | Example |
+|-----------|---------|
+| Create room | `curl -s -X POST https://sync.parc.land/rooms -H 'Content-Type: application/json' -d '{"id":"my-room"}'` |
+| Join agent | `curl -s -X POST https://sync.parc.land/rooms/my-room/agents -H 'Content-Type: application/json' -H 'Authorization: Bearer room_TOKEN' -d '{"id":"alice","name":"Alice","role":"player"}'` |
+| Write state | `curl -s -X PUT https://sync.parc.land/rooms/my-room/state/batch -H 'Content-Type: application/json' -H 'Authorization: Bearer TOKEN' -d '{"writes":[...]}'` |
+| Read state | `curl -s https://sync.parc.land/rooms/my-room/state -H 'Authorization: Bearer TOKEN'` |
+| Define action | `curl -s -X PUT https://sync.parc.land/rooms/my-room/actions -H 'Content-Type: application/json' -H 'Authorization: Bearer TOKEN' -d '{...}'` |
+| Invoke action | `curl -s -X POST https://sync.parc.land/rooms/my-room/actions/ACTION_ID/invoke -H 'Content-Type: application/json' -H 'Authorization: Bearer TOKEN' -d '{"params":{...}}'` |
+| Wait for condition | `curl -s 'https://sync.parc.land/rooms/my-room/wait?condition=EXPR&include=state,actions,views' -H 'Authorization: Bearer TOKEN'` |
+| Read views | `curl -s https://sync.parc.land/rooms/my-room/views -H 'Authorization: Bearer TOKEN'` |
+| Dashboard | `https://sync.parc.land/?room=ROOM_ID#token=TOKEN` |
 
-## Key Commands
+### Workflow
 
-- `deno task vt:clone` — Clone Val Town project locally (needs VAL_TOWN_API_KEY)
-- `deno task vt:push` — Push local changes to Val Town
-- `deno task vt:pull` — Pull latest from Val Town
-- `deno task deploy` — Full clone+sync+push deploy
-- `deno lint src/` — Lint source files
+1. **Read the docs** — `curl -s https://sync.parc.land/` before starting
+2. **Create a room** — save the room token (admin, `room_` prefix)
+3. **Set up state, actions, views** — using the room token
+4. **Join agents** — save each agent token (`as_` prefix)
+5. **Interact** — agents invoke actions, wait on conditions, read views
 
-## Structure
+### Tips
 
-- `src/` — Val Town source files (main.ts, schema.ts, cel.ts, dashboard.ts, timers.ts, reference/)
-- `scripts/deploy.ts` — Deploy script
-- `.github/workflows/deploy.yml` — CI/CD auto-deploy on push to main
+- Room tokens (`room_`) are admin — full scope authority
+- Agent tokens (`as_`) are scoped — own scope + explicit grants
+- Agent scopes are private by default; use views for public projections
+- Use `wait` endpoint with CEL conditions for coordination (long-poll)
+- All expressions use CEL — check the root docs for context variables
+- Timers support wall-clock (`ms`, `at`) and logical-clock (`ticks`)
