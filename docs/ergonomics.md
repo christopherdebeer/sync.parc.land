@@ -234,3 +234,97 @@ The narrator used ~44 tool calls total.
 | View missing keys | N/A | NEW — shelter_built error |
 | Iteration budget | Wasted on waits | Tight but productive |
 | Game progression | Dark→outside, stalled | Dark→outside, budget limit |
+
+---
+
+## v5 Attempt (increment regression)
+
+### Changes from v4
+- Pre-seeded ALL 10 state keys (turn, phase, location, fire_level, wood,
+  door_found, shelter_built, room_description, stranger_appeared, last_event)
+  to prevent CEL "No such key" errors
+- Views use pre-seeded keys instead of `has()` guards (keys always exist)
+- Narrator uses `messages.count > N` (correct CEL, not `state._messages.count`)
+- Narrator tracks last sort_key to avoid duplicate event reactions
+- Player uses read→act→sleep(4s) loop with batched reads
+- Both agents at max_turns=35
+- Background tasks banned in both prompts
+
+### Blocker: `increment` broken (server regression)
+
+**Every action invocation failed** with:
+```
+SQLITE_CONSTRAINT: SQLite error: NOT NULL constraint failed: state.value
+```
+
+The `increment` write operation is broken at the database level. When an action
+write specifies `{"scope":"_shared","key":"turn","increment":1}` (no `value`
+field), the SQL sets `value` to NULL, violating the NOT NULL constraint.
+
+**Reproduction:**
+```bash
+# Seed a key
+curl -s -X PUT BASE/rooms/ROOM/state/batch -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"writes":[{"scope":"_shared","key":"counter","value":0}]}'
+# → OK
+
+# Try to increment it
+curl -s -X PUT BASE/rooms/ROOM/state/batch -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"writes":[{"scope":"_shared","key":"counter","increment":1}]}'
+# → SQLITE_CONSTRAINT: NOT NULL constraint failed: state.value
+
+# With both value + increment, increment is silently ignored
+curl -s -X PUT BASE/rooms/ROOM/state/batch -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"writes":[{"scope":"_shared","key":"counter","value":0,"increment":1}]}'
+# → value stays 0, increment ignored
+```
+
+**Error locations:**
+- `batchSetState` at main.ts:635 (direct writes)
+- `invokeAction` at main.ts:997 (action invocation)
+
+**Impact:** Game never progressed past turn 0. All 4 starter actions (feel_around,
+feed_ember, look, speak) used `increment` for the turn counter. The player
+exhausted 16 tool calls retrying actions. The narrator registered 10 future
+actions and entered its wait loop, but never received any player actions.
+
+### What worked despite the blocker
+
+1. **Room setup pattern is solid.** 10 state keys seeded, 4 views registered,
+   4 starter actions + 10 future-phase actions all created without errors.
+2. **Narrator registered all actions in one burst** — search_room, stoke_fire,
+   examine_door, open_door, gather_wood, explore_path, build_shelter,
+   return_inside, approach_stranger — all with correct `enabled` expressions.
+3. **Atmospheric timer worked.** `distant_howl` appeared in state with timer.
+4. **Views evaluated correctly** on pre-seeded keys (no missing-key errors).
+5. **Agent prompts were followed well.** Narrator read state, registered actions
+   in parallel, entered wait loop. Player waited 15s, read views+actions,
+   tried to act. Both followed the v5 loop design.
+
+### Workaround attempted
+
+Restructured actions to use event-sourcing: actions only append to `_messages`,
+narrator manually updates `_shared` state. This was applied mid-run but both
+agents had already exhausted most of their iteration budget on the broken actions.
+
+### v5 verdict
+
+**Blocked by platform regression.** The `increment` operation worked in v3/v4
+(player reached turn 8+ in v4). All v5 prompt/design fixes are validated at
+the setup level — just needs `increment` fixed to rerun.
+
+### Recommendations for server fix
+
+The `batchSetState` function needs to handle `increment`-only writes:
+```sql
+-- When increment is specified without value:
+INSERT INTO state (room_id, scope, key, value, version)
+  VALUES (?, ?, ?, ?, 1)
+  ON CONFLICT (room_id, scope, key)
+  DO UPDATE SET value = COALESCE(state.value, 0) + ?, version = version + 1
+```
+The `value` column in the INSERT should default to `0 + increment_amount`
+(or the increment amount itself), not NULL.
