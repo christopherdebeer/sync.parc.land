@@ -46,6 +46,11 @@ refinements:
    (scope: "alice") to access alice's state. Cross-scope aggregation works
    by referencing other views: `views["alice-move"]`.
 
+9b. **`state.self` in views resolves to the READER, not the registrar.**
+    If alice registers a view with `state.self.move`, bob reading it sees
+    bob's move. Use `state["alice"].move` (explicit agent ID) to expose
+    the registrar's data. This is the #1 view footgun.
+
 10. **Audit log leaks action params.** The `_audit` scope is readable by all
     agents and logs every action invocation including params. So `_set_state`
     calls with secret values are visible in audit. Information hiding via
@@ -56,6 +61,32 @@ refinements:
     and kills the previous one. The orchestrator must save tokens on first
     join and never accidentally re-join (which would invalidate tokens
     already handed to spawned subagents).
+
+12. **CEL type mismatch: `double + int`.** JSON numbers are stored as `double`
+    in CEL. `state._shared.round + 1` fails. Fix: `int(state._shared.round) + 1`.
+    This is the #1 CEL footgun — any arithmetic on state values needs `int()`.
+
+13. **Template substitution is limited to `${self}`, `${params.x}`, `${now}`.**
+    `${state._shared.round}` does NOT resolve — it stores the literal string.
+    For computed values in writes, use `"expr": true` on the write entry:
+    `{"value": "int(state._shared.round) + 1", "expr": true}`.
+
+14. **No nested object increment.** Can't increment `scores.pro` inside a JSON
+    object. Use flat keys (`score_pro`, `score_con`) with `increment`.
+
+15. **Turn advancement needs `expr: true`.** A single action can submit AND
+    advance the turn using a computed write:
+    `{"key": "current_debater", "value": "state._shared.current_debater == \"pro\" ? \"con\" : \"pro\"", "expr": true}`.
+    Without this, you need a separate advance action.
+
+16. **`available` flag in context.** Actions pre-evaluate their `if` predicate
+    and report `available: true/false`. Agents can check what they can do
+    before attempting invocation, avoiding unnecessary 409s.
+
+17. **`self` is empty for room token.** Admin (room token) invocations have
+    `self == ""`, so role-gated actions like `self == "judge"` fail. The
+    orchestrator must use agent tokens for role-gated actions, or use
+    `_batch_set_state` directly for admin-level writes.
 
 ---
 
@@ -84,9 +115,11 @@ Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then build a r
 reads — so the original "referee gets scope grants to read" pattern was wrong.
 Corrected to use views with enabled expressions for the reveal.
 
-**Key pattern:** Player registers at join:
-`{ id: "alice-move", scope: "alice", expr: "state.self.move", enabled: "state._shared.phase == \"reveal\"" }`
+**Key pattern:** Player registers at join (use explicit agent ID, NOT `state.self`):
+`{ id: "alice-move", scope: "alice", expr: "state[\"alice\"].move", enabled: "state._shared.phase == \"reveal\"" }`
 Move stays hidden until phase changes. Referee reads `views["alice-move"]`.
+Critical: `state.self` in views resolves to the READER — alice's view with
+`state.self.move` would show bob his OWN move, not alice's.
 
 ---
 
@@ -168,3 +201,6 @@ tally/next-turn logic can check.
 | Log/history building | `append: true` writes | Yes — auto-increment keys |
 | Auto-expose private state | `public: true` on `_set_state` | Yes — creates `scope.key` view |
 | Cross-scope aggregation | View CEL referencing other views | Yes — `views["x"]` in expr |
+| CEL arithmetic on state | `int(state._shared.x) + 1` | Yes — needs `int()` cast |
+| Computed writes | `"expr": true` on write entry | Yes — evaluates CEL at invoke time |
+| Atomic counters | `increment` on flat keys | Yes — no nested object increment |
