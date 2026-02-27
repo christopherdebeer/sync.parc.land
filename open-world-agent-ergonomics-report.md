@@ -11,7 +11,7 @@ Two experiments ran, each with 4 concurrent AI sub-agents (2 world builders, 2 p
 | Experiment | Approach | Waves | Messages | Custom Actions | Outcome |
 |------------|----------|-------|----------|----------------|---------|
 | **v1** | Scripted checklists | 1 | 14 | 6 | Players stuck — `${self}` bug blocked all gameplay |
-| **v2** | Open-ended prompts | 2+ | 139+ | 17 | Rich emergent world — quest completions, NPC interactions, world events, player cooperation |
+| **v2** | Open-ended prompts | 2 | 156 | 19 | Rich emergent world — 10 quests, 10 NPCs, 9 regions, player cooperation, Heartwood exploration |
 
 **v2 agents** were given only: role, credentials, API reference, constraint documentation, and the mandate "read context, decide what to do, be creative." No fixed task lists. When agents depleted their turns, new waves re-launched them into the existing world state.
 
@@ -155,6 +155,18 @@ This is a tooling issue, not an API issue, but it dominated the agent developer 
 
 All messages are broadcast. Gaia couldn't whisper to Lorekeeper for coordination. A scoped message or `to:` parameter would help.
 
+### P3: Message `recent` window is fixed-size with no pagination
+
+The `messages.recent` array is a fixed-size tail. In a high-traffic room (156+ messages), a `wait` trigger on `messages.count > N` may return context where the triggering message has already scrolled out of `recent`. There's no way to fetch a specific message by sequence number, or to request `messages_after=N` on `/context` (only on `/wait`).
+
+### P3: Action parameter validation is permissive
+
+Unknown parameter names are silently accepted. `present_to_stag(item_id=...)` and `present_to_stag(item=...)` both succeed even if the action schema only defines one of them. Stricter validation with helpful errors would prevent silent intent mismatches.
+
+### P3: Action invocations clutter message stream
+
+Every action invocation appears as a `kind: "action_invocation"` message. In active play, the message stream becomes dominated by mechanical invocations mixed with narrative. A filter parameter on `/context` like `message_kinds=narration,chat` would help agents focus on narrative content.
+
 ## Emergent Patterns Worth Documenting
 
 These patterns emerged organically from open-ended agent play and would be valuable to document for future users:
@@ -192,7 +204,7 @@ The v2 experiment produced a coherent multi-chapter story across 2 waves:
 
 **Night (Wave 2):** The Stag accepted their meadow tokens and opened the path. Both players entered the Heartwood. Finn encountered the Hollow Folk — broken Wardens carrying bone-white lanterns. He tried to mend one named Thessaly with the stag antler shard. Lyra channeled the Dreamer's frequency through the Root Mother tree.
 
-**Final state:** 139+ messages, 10 quests (2 completed), 17 custom actions, 9 NPCs, both players at energy ~40-45 in the deep forest. A living, evolving world built entirely through the coordination API.
+**Final state:** 156 messages, 10 quests (2 completed), 19 custom actions, 10 NPCs, 9 regions, 26 views. Both players at energy 35-40 in the Heartwood, kneeling before the Root Mother, awaiting her revelation about the Unmooring. A living, evolving world built entirely through the coordination API.
 
 ## Summary of Recommendations
 
@@ -209,6 +221,9 @@ The v2 experiment produced a coherent multi-chapter story across 2 waves:
 | P2 | No message filtering in `wait` | Allow `messages.recent.exists(...)` in CEL |
 | P3 | Shell escaping friction | Document heredoc pattern, consider SDK |
 | P3 | No private messaging | Add `to:` parameter on `_send_message` |
+| P3 | Message `recent` window fixed-size, no pagination | Add `messages_after=N` to `/context` |
+| P3 | Action params not validated | Reject unknown parameter names |
+| P3 | Action invocations clutter message stream | Add `message_kinds=` filter to `/context` |
 
 ## Conclusion
 
