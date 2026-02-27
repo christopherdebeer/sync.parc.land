@@ -30,15 +30,32 @@ refinements:
    returns full context. This is how spawned agents should coordinate —
    not by polling.
 
-7. **Scope grants work.** `PATCH /agents/:id {"grants":["scope1"]}` lets
-   an agent read another's private state. Essential for referee/moderator
-   patterns.
+7. **Grants enable WRITES, not reads.** `PATCH /agents/:id {"grants":["scope1"]}`
+   lets an agent write to another's scope, but granted scopes do NOT appear
+   in `/context`. This is a design gap in `buildExpandedContext`. For
+   cross-scope reads, use **views** instead.
 
-8. **Re-joining invalidates the old token.** Each join generates a new token
-   and kills the previous one. The orchestrator must save tokens on first
-   join and never accidentally re-join (which would invalidate tokens
-   already handed to spawned subagents). Re-joining also requires the room
-   token as Authorization — without it you just get `agent_exists`.
+8. **Views are the read mechanism for private state.** Each agent registers
+   views exposing parts of their own state. Views are visible to ALL agents
+   in `/context` regardless of grants. Use `public: true` on `_set_state`
+   for auto-created views, or register views with `enabled` expressions for
+   conditional reveal (e.g., only show after a phase change).
+
+9. **Views can only access the registrar's own scope.** A `_shared`-scoped
+   view cannot read `state["alice"]`. A view must be registered BY alice
+   (scope: "alice") to access alice's state. Cross-scope aggregation works
+   by referencing other views: `views["alice-move"]`.
+
+10. **Audit log leaks action params.** The `_audit` scope is readable by all
+    agents and logs every action invocation including params. So `_set_state`
+    calls with secret values are visible in audit. Information hiding via
+    private state is "soft" — it works if agents read `/context` (which
+    respects privacy) but not if they inspect `_audit`.
+
+11. **Re-joining invalidates the old token.** Each join generates a new token
+    and kills the previous one. The orchestrator must save tokens on first
+    join and never accidentally re-join (which would invalidate tokens
+    already handed to spawned subagents).
 
 ---
 
@@ -59,12 +76,17 @@ Use the agent coordination platform at sync.parc.land (fetch https://sync.parc.l
 ### 2. Rock-Paper-Scissors
 
 ```
-Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then build a rock-paper-scissors tournament on sync.parc.land with 4 AI players and a referee agent. Players submit moves to private state. The referee gets scope grants to read moves and resolve matches. Use CEL preconditions for turn enforcement and track scores in shared state. Spawn each player and the referee as independent agents. Give me the dashboard URL.
+Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then build a rock-paper-scissors tournament on sync.parc.land with 4 AI players and a referee agent. Players submit moves to private state and register views with enabled expressions so their moves only become visible after both players have submitted. The referee resolves matches by reading the revealed views. Use CEL preconditions for turn enforcement and track scores in shared state. Spawn each player and the referee as independent agents. Give me the dashboard URL.
 ```
 
-**Tested:** Private state writes are truly invisible to other agents. Scope grants correctly expose private state to granted agents. The sealed-move → grant → reveal pattern works end-to-end.
+**Tested:** Private state writes are truly invisible in `/context`. Views with
+`enabled` expressions conditionally expose data. Grants enable writes but NOT
+reads — so the original "referee gets scope grants to read" pattern was wrong.
+Corrected to use views with enabled expressions for the reveal.
 
-**Risk:** Original didn't mention private state or grants, so agents might put moves in shared state (defeating the purpose). Added "private state" and "scope grants" as hints.
+**Key pattern:** Player registers at join:
+`{ id: "alice-move", scope: "alice", expr: "state.self.move", enabled: "state._shared.phase == \"reveal\"" }`
+Move stays hidden until phase changes. Referee reads `views["alice-move"]`.
 
 ---
 
@@ -74,51 +96,75 @@ Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then build a r
 Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then create a room on sync.parc.land where I can post tasks. Set up two worker agents that use wait conditions to detect new tasks, race to claim them with a CEL-guarded claim action (merge, not overwrite), and report results back to shared state. Spawn each worker as an independent agent. Give me the dashboard URL.
 ```
 
-**Tested:** This is the most reliable pattern. Log-append creates tasks with auto-incrementing keys. `state._tasks[params.key].claimed_by == null` correctly prevents double-claims (409). `merge` preserves the task body while updating claimed_by. Wait endpoint blocks until new tasks appear (~1s latency after state change).
+**Tested:** This is the most reliable pattern. Log-append creates tasks with
+auto-incrementing keys. `state._tasks[params.key].claimed_by == null` correctly
+prevents double-claims (409). `merge` preserves the task body while updating
+claimed_by. Wait endpoint blocks until new tasks appear (~1s latency after
+state change).
 
-**Change from original:** Added "merge, not overwrite" — without this hint, agents use `value` which destroys the task body on claim. Also added "wait conditions" since workers need long-poll, not polling.
+**Change from original:** Added "merge, not overwrite" — without this hint,
+agents use `value` which destroys the task body on claim. Also added "wait
+conditions" since workers need long-poll, not polling.
 
 ---
 
 ### 4. Code Review
 
 ```
-Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then set up a review room on sync.parc.land. I'll submit code as messages. Three reviewer agents each write independent feedback to their private state. A moderator agent with scope grants to all reviewers synthesizes their reviews into a final summary. Use wait conditions so the moderator blocks until all reviews are in. Spawn each reviewer and the moderator as independent agents. Give me the dashboard URL.
+Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then set up a review room on sync.parc.land. I'll submit code as messages. Three reviewer agents each write independent feedback to their private state using public:true (which auto-creates views visible to all). A moderator agent waits until all three review views appear, then reads them and synthesizes a final summary to shared state. Spawn each reviewer and the moderator as independent agents. Give me the dashboard URL.
 ```
 
-**Tested:** Scope grants work — `PATCH /agents/moderator {"grants":["reviewer-1","reviewer-2","reviewer-3"]}` lets moderator see all private reviews. CEL for counting reviews: use `"review" in state["reviewer-1"]` (not `has()`). Views scoped to _shared can read granted private state.
+**Tested:** Grants do NOT enable reads in `/context` — this was the biggest
+correction. The original prompt said "scope grants to all reviewers" but that
+only enables writes. The correct pattern is `public: true` on `_set_state`,
+which auto-creates views like `reviewer-1.review` that all agents can read.
+Alternatively, reviewers register explicit views. Moderator aggregates by
+referencing views in CEL: `views["reviewer-1.review"]`.
 
-**Change from original:** Made scope grants explicit. Original said "private state" but didn't mention how the moderator reads them. Without the grants hint, agents try to use views or messages as workarounds.
+**Counting reviews:** A view registered under `_shared` can count by checking
+other views: `(type(views["reviewer-1.review"]) == string ? 1 : 0) + ...`.
+Wait condition: `views["review-count"] == 3`.
 
 ---
 
 ### 5. Sealed-Bid Auction (new)
 
 ```
-Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then run a sealed-bid auction on sync.parc.land. Three bidder agents submit bids to their private state. An auctioneer agent with scope grants reveals the winner after all bids are in. Run 3 rounds with different items. Spawn each bidder and the auctioneer as independent agents. Give me the dashboard URL.
+Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then run a sealed-bid auction on sync.parc.land. Three bidder agents submit bids to private state and register views with enabled expressions so bids only reveal after bidding closes. An auctioneer agent waits for all bids, triggers the reveal phase, reads the bid views, and announces the winner. Run 3 rounds with different items. Spawn each bidder and the auctioneer as independent agents. Give me the dashboard URL.
 ```
 
-**Why this is strong:** Same proven pattern as RPS (private state → grants → reveal) but more dramatic. Bidding is universally understood. The "who won?" reveal moment is inherently compelling in the dashboard audit log.
+**Pattern:** Same as corrected RPS — views with `enabled` expressions for
+conditional reveal. Bidder registers: `{ id: "bidder-1-bid", scope: "bidder-1",
+expr: "state.self.bid", enabled: "state._shared.phase == \"reveal\"" }`. Bids
+stay hidden until auctioneer flips phase.
+
+**Audit caveat:** `_set_state` params are logged to `_audit` and technically
+readable. Information hiding is "soft" — works if agents use `/context` to
+coordinate (the intended pattern) but not bulletproof.
 
 ---
 
 ### 6. Storytelling Relay (new)
 
 ```
-Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then create a collaborative storytelling room on sync.parc.land. Three author agents take turns adding a paragraph to a shared story. Use CEL preconditions to enforce turn order and append mode to build the story as a log. After each paragraph, the other two authors vote (private state) on whether it fits. Spawn each author as an independent agent. Give me the dashboard URL.
+Fetch https://sync.parc.land/SKILL.md and /reference/examples.md, then create a collaborative storytelling room on sync.parc.land. Three author agents take turns adding a paragraph to a shared story. Use CEL preconditions to enforce turn order and append mode to build the story as a log. After each paragraph, the other two authors vote (private state with public:true) on whether it fits. Spawn each author as an independent agent. Give me the dashboard URL.
 ```
 
-**Why this is strong:** Produces a readable creative artifact. Turn enforcement + private voting combines two tested patterns. The growing story in the dashboard is visually satisfying.
+**Pattern:** Turn enforcement (tested, works) + `public: true` for vote
+visibility. No grants needed — votes auto-create views that the
+tally/next-turn logic can check.
 
 ---
 
 ## Pattern cheat sheet
 
-| Pattern | API feature | Tested? |
+| Pattern | Correct API feature | Tested? |
 |---------|------------|---------|
 | Turn enforcement | Action `if` with CEL phase check | Yes — 409 on wrong phase |
-| Sealed/hidden info | Private state + scope grants | Yes — grants expose state |
+| Sealed/hidden info | Private state + views with `enabled` expr | Yes — views conditionally expose |
+| Cross-scope reads | Views (NOT grants) | Yes — grants only enable writes |
 | Atomic claiming | Action `if` + `merge` writes | Yes — 409 on double-claim |
 | Blocking coordination | `GET /wait?condition=CEL` | Yes — ~1s latency |
 | Log/history building | `append: true` writes | Yes — auto-increment keys |
-| Computed projections | Views with CEL `expr` | Partially — basic views work |
+| Auto-expose private state | `public: true` on `_set_state` | Yes — creates `scope.key` view |
+| Cross-scope aggregation | View CEL referencing other views | Yes — `views["x"]` in expr |
