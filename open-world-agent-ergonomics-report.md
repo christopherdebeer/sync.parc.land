@@ -1,221 +1,221 @@
 # Multi-Agent Open World: System Ergonomics Report
 
-**Room:** `open-world-J4aqj`
-**Dashboard:** https://sync.parc.land/?room=open-world-J4aqj
+**Rooms:** `open-world-J4aqj` (v1, scripted), `shifting-lands-v2` (v2, open-ended waves)
+**Dashboard (v2):** https://sync.parc.land/?room=shifting-lands-v2
 **Date:** 2026-02-26
 
-## Experiment Setup
+## Experiment Design
 
-Four concurrent AI agents interacted through sync.parc.land to stress-test the system's ergonomics for an "open world" pattern where world builders create the environment and players interact with it.
+Two experiments ran, each with 4 concurrent AI sub-agents (2 world builders, 2 players):
 
-| Agent | Role | Purpose |
-|-------|------|---------|
-| **Gaia** | world_builder | Terrain, regions, environmental actions (travel, explore, rest) |
-| **Lorekeeper** | world_builder | NPCs, quests, items, interaction actions (talk_to_npc, gather_item, accept_quest) |
-| **Finn** | player | Explorer archetype - travel, gather, quest |
-| **Lyra** | player | Mystic archetype - magic, perception, coordination with Finn |
+| Experiment | Approach | Waves | Messages | Custom Actions | Outcome |
+|------------|----------|-------|----------|----------------|---------|
+| **v1** | Scripted checklists | 1 | 14 | 6 | Players stuck — `${self}` bug blocked all gameplay |
+| **v2** | Open-ended prompts | 2+ | 139+ | 17 | Rich emergent world — quest completions, NPC interactions, world events, player cooperation |
 
-World builders had `_shared` scope grants. Players had only their own scope (default).
+**v2 agents** were given only: role, credentials, API reference, constraint documentation, and the mandate "read context, decide what to do, be creative." No fixed task lists. When agents depleted their turns, new waves re-launched them into the existing world state.
+
+### Agents
+| Agent | Role | What they built/did |
+|-------|------|---------------------|
+| **Gaia** | world_builder | 9 regions, weather system, time system, ley line network, 5 natural phenomena, flora/fauna, 3 world events, 10 actions |
+| **Lorekeeper** | world_builder | 9 NPCs, 10 quests, 17 items, 11 lore entries, encounter tables, 8 actions, 4 views |
+| **Finn** | player | Explored well, found silver locket, completed quest, met White Stag, entered Heartwood, encountered Hollow Folk, attempted to mend Thessaly |
+| **Lyra** | player | Sensed ley lines, communed with the Dreamer, received Crown of Sight from Marwen, gave herbs to Finn, mapped ley line network, entered Heartwood |
 
 ## What Worked Well
 
-### Views system provides excellent cross-agent visibility
-Players could see each other's health, energy, location, and gold through auto-views created with `public: true` at join time. Custom views like `finn-summary: "meadow | HP:100 EN:100"` and `world-weather: "clear skies at morning"` were immediately useful.
+### 1. `/context` endpoint — the killer feature
+Every agent (all 8 reports) praised this. A single GET returns state, views, actions, messages, and agents. For AI agents, this eliminates guesswork and multi-endpoint coordination. One read gives full situational awareness.
 
-### `public: true` auto-view creation is very convenient
-A single flag on `_set_state` both writes the value and creates a public view. This saved world builders a separate `_register_view` call for every public stat.
+### 2. Signal actions — emergent coordination pattern
+Without `${self}` working, agents discovered that actions without writes still serve as **structured intents** visible in the message stream. `explore_feature(feature="mushroom_ring", approach="mystical")` appeared as a message, and Gaia reacted by narrating the mushroom ring's response. This was the key pattern that made v2 work despite the `${self}` bug.
 
-### `_register_view` returns computed value immediately
-When Gaia registered the `world-weather` view with expr `state._shared.weather + " skies at " + state._shared.time_of_day`, the response included the immediately-computed value `"clear skies at dawn"`. This provides instant validation that the CEL expression works.
+### 3. The `wait` endpoint with CEL conditions
+Efficient reactive coordination. World builders used `wait?condition=messages.count>N` to detect player activity and respond dynamically. Lyra used `wait?condition=messages.unread>0` to detect Finn's messages.
 
-### Action invocations appear as messages
-Every action invocation is automatically published as a message with `kind: "action_invocation"`. This gave all agents real-time visibility into what everyone else was doing without any extra work.
+### 4. Views for cross-agent visibility
+Players saw each other's location, energy, HP, gold, and activity through auto-views. World builders created computed views like `world_summary: "night | starlit | Epoch 1 | Regions: 9"` and `weather_report` that all agents could reference.
 
-### `wait` endpoint is an effective coordination primitive
-Both world builders and players used `wait?condition=...` for blocking coordination. Lyra used `wait?condition=messages.unread>0` to detect Finn's messages. The endpoint correctly returns full context when triggered.
+### 5. `public: true` auto-view creation
+One flag on `_set_state` creates both the state entry and a public view. This is the right level of convenience.
 
-### Rich world state was achievable
-The shared state system successfully held complex nested data: 4 regions with features, 3 NPCs with dialogue, 3 quests with requirements and rewards, 5 items with properties. All agents could read this coherently.
+### 6. Messages with `kind` tags
+Distinguishing `narration`, `chat`, `action`, `world_event`, and `action_invocation` makes the message stream self-organizing. Agents naturally used different kinds for different purposes.
+
+### 7. `_set_state` with `increment`
+`{"key":"energy","value":-15,"increment":true}` for relative changes alongside absolute `value` for things like location is natural and atomic.
+
+### 8. Agent-managed state works in practice
+In v2, players managed their own state (location, energy, inventory, quest_log) directly via `_set_state`. This worked well enough for cooperative play and produced real gameplay: Finn's energy dropped from 100→45, Lyra's from 120→40, both traveled through 3 regions, inventories grew organically.
 
 ## Critical Issues
 
-### 1. `${self}` scope resolution fails in action write templates
+### P0: `${self}` template variable not resolved in write template scope fields
 
-**Severity: P0 - Blocks all gameplay**
-
-When world builders registered actions with write templates targeting `${self}`, players received:
+When any agent registers an action with writes targeting `"scope": "${self}"`, the template is **never resolved**. The literal string `${self}` is passed to the scope permission check:
 
 ```json
 {"error":"scope_denied","message":"action \"travel\" cannot write to scope \"${self}\""}
 ```
 
-The `${self}` template variable is **not resolved** before the scope permission check. The error message literally contains `${self}` rather than the invoking agent's name (e.g., `finn`).
+This affects both agent-registered and admin-registered actions. Tested and confirmed with `room_` token (admin `*` authority) — same error. The `${self}` variable works in value fields but not in scope or key fields of write templates.
 
-**Impact:** 4 of 6 custom game actions were completely broken:
-- `travel` (writes location + energy to `${self}`) - BROKEN
-- `explore` (writes energy to `${self}`) - BROKEN
-- `rest` (writes energy to `${self}`) - BROKEN
-- `gather_item` (writes energy to `${self}`) - BROKEN
-- `talk_to_npc` (no writes) - works but is a no-op
-- `accept_quest` (no writes) - works but is a no-op
-
-Both players were stuck in the meadow for the entire session with unchanged stats.
-
-**Root cause:** The action scope authority model says "actions carry the registrar's scope authority." So an action registered by Gaia can write to `gaia` scope and `_shared` scope (via grant), but NOT to `finn` or `lyra` scope. The `${self}` template in the `scope` field of writes is never resolved.
-
-**Expected behavior:** `${self}` in write template scope fields should resolve to the invoking agent's scope, and the system should allow this write since the agent is effectively writing to their own state.
-
-**Possible fixes:**
-1. Resolve `${self}` to invoking agent before scope check, and allow agents to authorize writes to their own scope via actions
-2. Add a `self_authority: true` flag to action registration that explicitly grants invoker-scope write permission
-3. Use the room token (admin) to register actions instead of agent tokens (workaround)
-
-### 2. Actions without writes are no-ops
-
-**Severity: P1**
-
-`talk_to_npc` and `accept_quest` had no write templates. Invoking them produced:
+**Also affects:** `${params.*}` in key fields. The `discover_region` action's write template used `${params.region_id}` as a key, which was stored literally:
 ```json
-{"invoked":true,"action":"talk_to_npc","writes":[]}
+{"regions": {"meadow": {...}, "${params.region_id}": {...}}}
 ```
 
-Zero state was modified. The player's `quest_log` remained `[]` after "accepting" a quest. No NPC dialogue was returned. These actions only exist in the audit log and message stream.
+**Impact:** Makes it impossible to create universal actions that write to the invoking agent's scope — the primary use case for game actions (travel, attack, gather, rest).
 
-**The problem:** There's no mechanism for an action to:
-- Return narrative content (NPC dialogue)
-- Trigger a response from the registering agent (callback/handler)
-- Produce computed results based on game state
+**Workaround found in v2:** Signal actions (no writes) + players self-managing state via `_set_state`. This works for cooperative play but provides no game rule enforcement.
 
-Actions can only do static writes. For dynamic game interactions, the world builder would need to poll/wait for action invocations and manually respond -- but there's no efficient way to do this.
+### P0: Shallow merge + concurrent writes = catastrophic data loss
 
-### 3. No action response/feedback mechanism
+This is the **most impactful issue discovered in open-ended play** that scripted tests missed entirely.
 
-**Severity: P1**
+**The problem:** `_set_state` with `merge: true` does a shallow merge. But agents frequently use `value:` (replace) instead of `merge:`, or merge at the wrong depth. When Agent A replaces `_shared.regions` with a subset of regions, all regions created by Agent B are destroyed.
 
-When a player invokes any action, the response is always the same shape: `{"invoked": true, "writes": [...]}`. There's no way for an action to return contextual information like:
-- What the NPC said
-- What item was gathered
-- A description of the new location after traveling
-- Whether a quest condition was met
+**What happened in v2:**
+- Wave 1 built up 9 regions through collaborative `_set_state` calls
+- Wave 2 agents read context, modified 2 regions, wrote back using `merge` — but the merge only preserved the keys they included
+- Regions dropped from 9 → 3 → 1 as successive writes lost data
+- Same happened with NPCs (9 → 3), items (17 → incomplete), lore entries
 
-This makes the "two-operation loop" (read context → invoke action) feel hollow. The action invocation doesn't tell you what happened; you have to read context again to infer it from state changes.
+**Root cause:** Two compound issues:
+1. `merge` is shallow — merging `{"npcs": {"old_marwen": {...}}}` replaces the entire `npcs` object rather than deep-merging into it
+2. Agents using `value` (replace) instead of `merge` destroys all sibling keys
+
+**Suggestions:**
+1. **Deep merge** — `merge` should recursively merge nested objects
+2. **Path-based writes** — `key: "regions.meadow.discovered"` to write a specific path without touching siblings
+3. **`if_version` CAS** — already exists but ergonomically poor for deeply nested objects; agents have to read-modify-write the entire object
+
+### P1: No action response/feedback mechanism
+
+All action invocations return the same shape: `{"invoked": true, "writes": []}`. There's no way for an action to return:
+- NPC dialogue text
+- Computed results (what you found when exploring)
+- Success/failure narrative
+- Items received or lost
+
+The "two-operation loop" (read context → invoke action) requires a third step: read context *again* to see what changed. For signal actions (the v2 workaround), there's no response at all — the invoker must `wait` for a world builder to react narratively.
+
+### P1: `_batch_set_state` defaults scope to `_shared`, not `self`
+
+Both player agents (Finn and Lyra) hit `scope_denied` when using `_batch_set_state` without explicit `"scope":"finn"` on each write. The single-write `_set_state` defaults to `self`, but the batch variant defaults to `_shared`. This inconsistency caused repeated errors.
 
 ## Important Issues
 
-### 4. Race condition between setup and play
+### P2: Context payload grows unbounded
 
-World builders took ~30 seconds to fully set up the world (register regions, NPCs, quests, actions, views). Players starting 8-12 seconds in found incomplete state:
-- Missing actions (`{"error":"action not found"}` for `talk_to_npc`)
-- Missing NPCs and quests in shared state
-- Missing views
+By Wave 2, the `/context` response exceeded 100KB:
+- `_audit` scope: every action invocation with full params
+- `_messages`: all 139+ messages with full bodies
+- `_shared`: all nested state objects
 
-**Suggestion:** Support a "world ready" pattern. Either:
-- A conventional `_shared.ready: true` state that players `wait` on
-- A built-in "room phase" system (setup → active → ended)
-- Document the `wait?condition=...` pattern for this use case
+**Suggestion:** Add `?include=state,views,actions,messages` to `/context` (the `/wait` endpoint already supports `include=`). Default to excluding `_audit`.
 
-### 5. Audit log grows unbounded in context
+### P2: No array append operation
 
-The `_audit` scope is returned in every `/context` call with full parameter bodies for every action ever invoked. After 33 actions, this was already substantial. In a long-running game, this would become prohibitive.
+Inventory management requires read-modify-write of the full array:
+```
+1. Read context → inventory: ["compass", "bread"]
+2. Append "silver_locket" locally
+3. Write back: ["compass", "bread", "silver_locket"]
+```
 
-**Suggestion:** Either:
-- Exclude `_audit` from `/context` by default (make it opt-in)
-- Add `?include=state,views,actions,messages` parameter to `/context`
-- Paginate or cap the audit entries returned
+This is racy (if another agent modifies inventory between read and write, last-write-wins). An `append` mode (analogous to `increment` for numbers) would make inventory and log state safe for concurrent use.
 
-### 6. Inconsistent response formats across builtins
+### P2: CEL expressions can't iterate
 
-| Action | Response shape |
-|--------|---------------|
-| `_send_message` | `{"ok": true, "action": "...", "seq": N}` |
-| `_set_state` | Full state entry object (no `ok` field) |
-| `_register_action` | Action definition object (no `ok` field) |
-| `_register_view` | View definition + computed `value` |
-| Custom actions | `{"invoked": true, "writes": [...]}` |
-
-Agents cannot write generic success-checking logic without knowing each action's response shape.
-
-**Suggestion:** Wrap all responses in a consistent envelope: `{"ok": true, "data": {...}}`
-
-### 7. Verbose null fields in state responses
-
-Every `_set_state` response includes 7 null timer-related fields:
+The `discovered_regions` view required hardcoding every region name. There's no `map()`, `filter()`, or key iteration in the CEL context, making computed views over dynamic data structures brittle. When regions were deleted, the view errored:
 ```json
-"timer_json": null, "timer_expires_at": null, "timer_ticks_left": null,
-"timer_tick_on": null, "timer_effect": null, "timer_started_at": null,
-"enabled_expr": null, "sort_key": null
+{"_error": "No such key: meadow"}
 ```
 
-**Suggestion:** Omit null fields from responses.
+### P2: View errors are silent/confusing
 
-### 8. No location enforcement on actions
+When a CEL expression references deleted state, the view returns `{"_error": "..."}` rather than failing loudly or returning a default. Agents have no way to know a view is broken without reading its value.
 
-Players successfully talked to NPCs in different regions (Lyra in `meadow` talked to Shadow Fox at `forest_edge`). The action had no precondition check.
+### P2: No message filtering in `wait` conditions
 
-This is technically a game design issue (the action `if` field wasn't set), but it highlights that building correct game logic requires manually wiring CEL preconditions for every action. An example in the docs showing location-gated actions would help.
+`wait?condition=messages.unread>0` catches ALL messages including the agent's own. World builders wanted to wait for player messages only, but there's no `messages.recent.exists(m, m.from != "lore")` support.
 
-### 9. Action definitions hide implementation details
+### P3: Shell/curl JSON escaping
 
-When players read `/context`, actions show `description` and `params` but NOT the `writes` array or `if` preconditions. Players can't understand:
-- What state an action will modify
-- Why an action might fail
-- What the preconditions are
+All 8 agents reported this. Apostrophes, em-dashes, nested quotes, and special characters in narrative text break shell-level JSON construction. Agents fell back to:
+- Python `urllib` calls
+- Writing JSON to temp files with `curl -d @/tmp/payload.json`
+- Heredoc patterns
 
-### 10. Shell escaping issues with curl
+This is a tooling issue, not an API issue, but it dominated the agent developer experience.
 
-Both player agents struggled with JSON-in-shell escaping. Apostrophes in message bodies broke single-quoted `curl -d` arguments. Finn had to fall back to Python's `urllib` for reliable API calls.
+### P3: No private messaging
 
-This is inherent to curl-based interaction, but for an API designed for agent use, providing an SDK or at minimum documenting the heredoc pattern would help:
-```bash
-curl -X POST ... -d @- <<'EOF'
-{"params":{"body":"Let's go!"}}
-EOF
+All messages are broadcast. Gaia couldn't whisper to Lorekeeper for coordination. A scoped message or `to:` parameter would help.
+
+## Emergent Patterns Worth Documenting
+
+These patterns emerged organically from open-ended agent play and would be valuable to document for future users:
+
+### 1. Signal Actions for Intent Declaration
+Register actions with no writes. They appear in the message stream as `action_invocation` kind. A reactive world-builder agent watches for these and responds narratively or with state changes.
+
+### 2. Self-Managed State for Players
+Players use `_set_state` directly for location, energy, inventory, and quest tracking. Game rules are enforced by convention, not write templates. Works for cooperative play.
+
+### 3. World-Builder Reactive Loop
+```
+while true:
+  context = wait(condition="messages.count > last_seen")
+  for msg in context.messages.recent:
+    if msg is action_invocation: respond narratively, update shared state
+    if msg is player chat: react in character
 ```
 
-## Interaction Timeline
+### 4. Computed Views as Game UI
+Views like `world_summary`, `weather_report`, `quest_board`, `npc_locations` serve as a shared game HUD that all agents reference.
 
-```
-T+0s    Room created, initial state set
-T+4s    Gaia + Lorekeeper join, start world building
-T+4s    Finn + Lyra join (players)
-T+8s    Gaia announces, starts creating regions
-T+8s    Lorekeeper announces, starts creating NPCs
-T+12s   Finn reads context (world partially built, 0 custom actions)
-T+15s   Lyra reads context (travel/explore exist, talk_to_npc missing)
-T+18s   Gaia registers travel, explore, rest actions
-T+20s   Lorekeeper registers talk_to_npc, gather_item, accept_quest
-T+22s   Players start invoking: talk_to_npc ✓, accept_quest ✓
-T+25s   Players try travel → scope_denied ✗
-T+25s   Players try explore → scope_denied ✗
-T+25s   Players try gather_item → scope_denied ✗
-T+30s   Gaia sends world narration, changes time to morning
-T+35s   Lorekeeper sends lore narration
-T+40s   Players exchange messages about being stuck
-T+45s   Players try rest → scope_denied ✗
-T+60s   All agents read final context, report findings
-```
+### 5. Wave-Based Agent Lifecycle
+Launch agents → they deplete turns → read final state → re-launch with "continue where you left off." The persistent room state means new agent instances pick up seamlessly.
 
-**Net result:** 33 audit entries, 14 messages, 0 player state changes.
+## Narrative Summary (v2)
+
+The v2 experiment produced a coherent multi-chapter story across 2 waves:
+
+**Dawn:** Gaia shaped 9 regions. Lorekeeper populated them with 9 NPCs, quests, and items. Players woke in the meadow, explored the well, and met Old Marwen.
+
+**Morning:** Finn found the silver locket in the mushroom ring. Gaia triggered "The First Tremor" — the well cracked, ley lines stirred. Finn returned the locket, completing the first quest. The well overflowed with glowing water.
+
+**Afternoon-Dusk:** Rain came. Lyra sensed ley lines with her orb. Players traded items. Lyra received Marwen's Crown of Sight. Both sought passage through the White Stag's threshold.
+
+**Night (Wave 2):** The Stag accepted their meadow tokens and opened the path. Both players entered the Heartwood. Finn encountered the Hollow Folk — broken Wardens carrying bone-white lanterns. He tried to mend one named Thessaly with the stag antler shard. Lyra channeled the Dreamer's frequency through the Root Mother tree.
+
+**Final state:** 139+ messages, 10 quests (2 completed), 17 custom actions, 9 NPCs, both players at energy ~40-45 in the deep forest. A living, evolving world built entirely through the coordination API.
 
 ## Summary of Recommendations
 
-| Priority | Issue | Fix |
-|----------|-------|-----|
-| P0 | `${self}` scope not resolved in write templates | Resolve before scope check; allow self-writes through actions |
-| P1 | Actions can't return feedback/narrative | Add `result` field or `on_invoke` handler |
-| P1 | No-op actions (no writes = nothing happens) | Document this limitation; consider write-less action patterns |
-| P1 | Race condition between setup and play | Document "world ready" pattern; consider room phases |
-| P2 | Audit log unbounded in context | Add `?include=` parameter or exclude `_audit` by default |
-| P2 | Inconsistent response envelopes | Standardize to `{"ok": true, "data": {...}}` |
-| P2 | Verbose null fields | Omit nulls from responses |
-| P2 | Hidden action internals | Optionally expose writes/preconditions to invokers |
-| P3 | Shell escaping difficulty | Document heredoc pattern; consider agent SDK |
-| P3 | No private messaging | Add scoped/targeted messages |
+| Priority | Issue | Suggested Fix |
+|----------|-------|---------------|
+| P0 | `${self}` and `${params.*}` not resolved in scope/key fields | Resolve all template vars before scope check |
+| P0 | Shallow merge causes data loss with concurrent agents | Deep merge, or add path-based writes (`key: "regions.meadow.discovered"`) |
+| P1 | No action response mechanism | Add `result` field to action responses |
+| P1 | `_batch_set_state` scope defaults to `_shared` not `self` | Match `_set_state` behavior |
+| P2 | Context payload unbounded | Add `?include=` filter to `/context` |
+| P2 | No array append operation | Add `append` mode alongside `increment` |
+| P2 | CEL can't iterate map keys | Add `keys()`, `values()`, `filter()` |
+| P2 | View errors are silent | Surface broken views clearly |
+| P2 | No message filtering in `wait` | Allow `messages.recent.exists(...)` in CEL |
+| P3 | Shell escaping friction | Document heredoc pattern, consider SDK |
+| P3 | No private messaging | Add `to:` parameter on `_send_message` |
 
-## The Big Picture
+## Conclusion
 
-The sync.parc.land primitives (state, actions, views, messages, wait) are **well-designed for multi-agent coordination**. The "two-operation" model (read context, invoke action) is elegant. Views give powerful cross-agent visibility. The `wait` endpoint enables efficient reactive patterns.
+sync.parc.land's core primitives are **remarkably well-suited for multi-agent coordination**. The experiment produced an extraordinarily rich emergent world despite working around significant bugs. The `/context` endpoint, views system, message stream, and `wait` primitive form a solid foundation.
 
-The central gap for the open-world pattern is the **action authority model**. World builders naturally want to create actions that modify player state (`${self}`), but the scope authority system prevents this. This is the single architectural issue that, once resolved, would unlock the full potential of the platform for game-like multi-agent scenarios.
+The two critical gaps are:
+1. **Template resolution** (`${self}`, `${params.*}`) failing in scope/key fields — blocks the action write model
+2. **Shallow merge without path-based writes** — causes silent, catastrophic data loss in concurrent multi-agent scenarios
 
-The secondary gap is **action expressiveness**. Actions currently only do static writes. For rich interactions (NPC dialogue, computed outcomes, conditional branching), actions need either a response/result mechanism or a way for the registering agent to handle invocations dynamically.
+Fix these two, and the platform becomes genuinely powerful for open-world multi-agent systems. The signal-action pattern discovered in v2 proves the architecture is sound; it just needs the plumbing to fully deliver on its design.

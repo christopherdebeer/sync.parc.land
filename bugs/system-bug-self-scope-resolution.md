@@ -1,4 +1,4 @@
-# BUG: `${self}` template variable not resolved in action write scope field
+# BUG: Template variables not resolved in action write scope AND key fields
 
 **Type:** System bug
 **Severity:** P0 - Blocks core functionality
@@ -7,7 +7,12 @@
 
 ## Summary
 
-When a custom action registered by Agent A includes a write template with `"scope": "${self}"`, and Agent B invokes that action, the system returns `scope_denied` with the error message containing the literal unresolved string `${self}` rather than the invoking agent's ID. The `${self}` template variable is not resolved before the scope permission check.
+Template variables (`${self}`, `${params.*}`) are NOT resolved in `scope` or `key` fields of action write templates. They are only resolved in `value` fields. This means:
+
+1. `"scope": "${self}"` → literal string `${self}` passes to scope check → `scope_denied`
+2. `"key": "${params.region_id}"` → literal string `${params.region_id}` stored as a key name in state
+
+Both confirmed across two separate multi-agent experiments.
 
 ## Steps to Reproduce
 
@@ -88,6 +93,22 @@ This bug makes it impossible to implement the documented action pattern where on
 - Both player agents (Finn, Lyra) received `scope_denied` on all 4 actions
 - 100% reproduction rate across both players and all 4 affected actions
 
+## Additional: `${params.*}` also not resolved in key fields
+
+In v2, the `discover_region` action was registered with:
+```json
+{"writes": [{"scope": "_shared", "key": "${params.region_id}", "value": {"discovered": true}}]}
+```
+
+When invoked with `{"params":{"region":"deep_forest"}}`, the resulting state contained:
+```json
+{"regions": {"${params.region_id}": {"discovered": true}}}
+```
+
+The literal string `${params.region_id}` was stored as a key name instead of being resolved to `"deep_forest"`.
+
 ## Workaround
 
-Register actions using the room token (`room_` prefix) which has `*` (admin) authority over all scopes. This is not ideal as it requires the admin token for action registration rather than delegating to world builder agents.
+- **For scope:** Use signal actions (no writes) + have agents manage their own state via `_set_state` directly. This sacrifices game rule enforcement.
+- **For key:** Hardcode key names in write templates rather than using template variables.
+- **Neither:** The room token (`room_` prefix, `*` authority) also fails — the issue is in template resolution, not authority.
