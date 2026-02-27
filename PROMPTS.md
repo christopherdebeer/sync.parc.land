@@ -34,9 +34,11 @@ refinements:
    an agent read another's private state. Essential for referee/moderator
    patterns.
 
-8. **Re-joining an existing agent returns the token.** Token management is
-   still the trickiest part for agents — they must save tokens from join
-   responses carefully.
+8. **Re-joining invalidates the old token.** Each join generates a new token
+   and kills the previous one. The orchestrator must save tokens on first
+   join and never accidentally re-join (which would invalidate tokens
+   already handed to spawned subagents). Re-joining also requires the room
+   token as Authorization — without it you just get `agent_exists`.
 
 ---
 
