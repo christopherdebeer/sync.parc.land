@@ -11,7 +11,7 @@ Interact with **https://sync.parc.land/** directly via `curl`.
 Full API docs are served as `text/plain` markdown at the root:
 
 ```bash
-curl -s https://sync.parc.land/
+curl -s https://sync.parc.land/SKILL.md
 ```
 
 Read this first whenever you need a refresher on endpoints, auth, CEL
