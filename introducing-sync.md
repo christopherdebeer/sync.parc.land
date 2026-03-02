@@ -1,4 +1,4 @@
-What follows is not a technical introduction so much as a narrative argument — tracing a line from three games that each grapple with the same hidden question, through an intellectual genealogy that arrives at the same threshold from thirteen different directions, to a small system that attempts to cross it.
+What follows is not a technical introduction so much as a narrative argument — tracing a line from three games that each grapple with the same hidden question, through decades of research that arrive at the same threshold from different directions, to a small system that attempts to cross it.
 
 The question: **What does it mean to interact with a world that already exists?**
 
@@ -95,31 +95,60 @@ In every case, the player experiences a living system, but the system itself can
 
 The illusion of emergence is powerful precisely because it hints at something just beyond reach: a world where interaction is not traversal through prewritten states but participation in an ongoing reality.
 
-The same gap appears across every intellectual lineage that touched this threshold. David Gelernter's **Linda** (1985) proposed the most radical coordination primitive in the history of distributed systems: processes should not know each other exists. They coordinate through a shared associative space. Three operations — `out` (write a tuple), `rd` (read by pattern), `in` (read and consume) — and nothing else. No channels, no addresses, no identity. Linda had the shared substrate, the write-and-observe loop, the structural anonymity between participants. But processes could not *interpret* unstructured tuples. The readers were procedural — they matched patterns literally, not semantically. The tuple space was a world, but nobody in it could understand what they were looking at.
+---
 
-Carl Hewitt's **actor model** (1973) took the opposite path entirely — isolating state inside processes and coordinating through message passing. No shared memory. No shared truth. Actors gained safety and predictability at the cost of shared understanding. They solved the coordination problem by eliminating the thing that needed coordinating. The substrate thesis inverts every commitment the actor model makes: share state, observe truth, let coordination emerge. These are dual approaches. Each has failure modes the other avoids.
+## V. The Pressure Field
 
-**Artificial life** research (Langton, 1989; Reynolds, 1987) demonstrated that simple local rules produce global structure — flocking, self-organization, emergent complexity. But artificial life systems lacked semantic observers. The emergent structures were geometric or statistical, not meaningful. No agent in a boid flock understands that it is flocking. No cell in Conway's Game of Life interprets the patterns it participates in.
+These three games are not isolated experiments. They sit inside a much larger pressure field — decades of research that each arrived, independently, at something close to the same threshold. The pattern repeats across eras, disciplines, and paradigms. Every generation builds a piece of the architecture. Every generation encounters the same constraint.
 
-Thirteen lineages in total — blackboard AI, tuple spaces, FRP, Smalltalk and moldable development, the actor model, ECA systems, affordance theory, statecharts, workflow systems, the CALM theorem, situated cognition, second-order cybernetics, artificial life — spanning half a century of computer science, psychology, biology, and philosophy. Each had the substrate thesis almost within reach. Each lacked an ingredient:
+David Gelernter's **Linda** (1985) proposed the most radical coordination primitive in the history of distributed systems: processes should not know each other exists. They coordinate through a shared associative space. Three operations — `out` (write a tuple), `rd` (read by pattern), `in` (read and consume) — and nothing else. No channels, no addresses, no identity. Linda had the shared substrate, the write-and-observe loop, the structural anonymity between participants. But processes could not *interpret* unstructured tuples. The readers were procedural — they matched patterns literally, not semantically. The tuple space was a world, but nobody in it could understand what they were looking at.
+
+Carl Hewitt's **actor model** (1973) took the opposite path — isolating state inside processes and coordinating through message passing. No shared memory. No shared truth. Actors gained safety and predictability at the cost of shared understanding. They solved the coordination problem by eliminating the thing that needed coordinating.
+
+**Artificial life** research (Langton, 1989; Reynolds, 1987) demonstrated that simple local rules produce global structure — flocking, self-organization, emergent complexity. But the emergent structures were geometric or statistical, not meaningful. No agent in a boid flock understands that it is flocking.
+
+And then, in a remarkable recapitulation, the AI community of the 2020s built the same set of approaches again — this time with language models as the computational substrate.
+
+**ReAct** (Yao et al., ICLR 2023) interleaves reasoning traces with action execution inside a single generation. The agent thinks, calls a tool, observes the result, thinks again. It is powerful for single-agent tasks. It is also, structurally, a tool-use pattern: the agent is the protagonist; the environment is a service counter; the observation is the result of the agent's own action. ReAct has nothing to say about shared worlds or coordination. It is a single rider on a single bicycle.
+
+**AutoGen** (Wu et al., 2023), **CAMEL** (Li et al., NeurIPS 2023), and Google's **A2A** protocol coordinate agents through conversation — direct message passing, agent-to-agent, by name. This is the actor model reborn: coordination through explicit communication rather than shared truth. The wiring complexity scales with the number of agent relationships. Every new participant must be introduced to the existing conversation.
+
+**LangGraph** models agents as nodes in a directed graph with state flowing along edges. **MetaGPT** (Hong et al., 2023) encodes Standardized Operating Procedures — fixed role sequences modeled on organizational charts. **CrewAI** combines event-driven Flows with role-specialized Crews. These are orchestrated workflows: someone must design the graph, write the SOP, define the flow. Structure is imposed, not emergent. The blackboard's centralized scheduler, wearing new clothes.
+
+One published system breaks the pattern. Park et al.'s **Generative Agents** (UIST 2023) — the Smallville paper — placed twenty-five LLM agents in a shared simulated environment. Agents coordinated not through messages but through the environment itself: they observed each other's actions, perceived the state of shared spaces, and self-activated based on what they saw. A single seed — one agent wanting to throw a Valentine's Day party — cascaded through the environment as agents observed, inferred, and responded. Social structure emerged without orchestration.
+
+Smallville is the most important empirical result in this story. It demonstrates that environment-mediated coordination produces emergent behavior in LLM multi-agent systems. It is also, still, a simulation — no authority model, no capability delegation, no structured observation, no declarative activation. Agents run on a clock tick and decide for themselves whether to act. It proved the thesis without providing the infrastructure.
+
+Across all of these — spanning half a century, from blackboard AI to tuple spaces to FRP to actors to affordance theory to statecharts to situated cognition to artificial life to ReAct to AutoGen to LangGraph to Generative Agents — the same absence persists. Each had a piece. Each lacked an ingredient:
 
 | Lineage | What it had | What it lacked |
 |---|---|---|
 | Blackboard AI | Shared workspace, opportunistic activation | Interpreters tolerant of open-world state |
 | Tuple spaces | Associative coordination, structural anonymity | Readers that could interpret unstructured data |
 | FRP | Declarative observation, reactive recomputation | A semantic meaning layer |
-| Actor model | Process isolation, message discipline | Shared ontology for coordination |
-| ECA systems | Guarded reactive rules | Participation (rather than automation) |
+| Actor model / AutoGen / CAMEL | Process discipline, message passing | Shared ontology for coordination |
+| LangGraph / MetaGPT / CrewAI | Structured workflows | Emergent coordination without prescription |
+| ECA systems | Guarded reactive rules | Participation rather than automation |
 | Affordance theory | Environmental perception, action possibilities | Executable, self-documenting affordances |
+| ReAct / Reflexion / Voyager | Powerful single-agent reasoning | A shared world; multi-agent coordination |
+| Generative Agents | Environment-mediated emergence | Infrastructure: authority, structure, activation |
 | Artificial life | Emergent structure from local rules | Meaning-producing observers |
 
-Language models supply most of these missing ingredients simultaneously. They are interpreters tolerant of open worlds. They produce semantic meaning from unstructured data. They can read affordance descriptions and act on them. They integrate with human cognition through natural language. They are the observers that blackboard AI needed, the readers that tuple spaces lacked, the meaning-producers that artificial life could not have.
+There is a term for the coordination pattern that keeps being approached and never quite implemented. It comes not from computer science but from entomology.
 
-This is why the substrate thesis becomes viable now and not in 1986 or 1997 or 2010. The computational environment finally matches the conceptual model.
+**Stigmergy** — coined by Pierre-Paul Grassé in 1959, studying termite nest construction — is indirect coordination through modification of a shared environment. Agents do not communicate. They leave traces in a medium. Other agents perceive those traces and respond. No ant tells another ant where to go. Each deposits a chemical trace; the accumulated traces create a gradient; the gradient coordinates the colony.
+
+The defining properties: no direct communication between agents; coordination emerges from cumulative environmental modification; self-organization without central control; the environment is simultaneously the communication medium and the work product.
+
+A search of the academic literature for "stigmergy" combined with "large language model agents" returns, as of early 2026, zero results. The swarm intelligence community has studied stigmergy for decades. The LLM agent community has not adopted the concept. This is a remarkable gap, because stigmergy is arguably the natural coordination model for language-model agents — entities that are good at interpreting ambiguous environmental signals and acting on them, which is precisely what stigmergic coordination requires.
+
+Language models supply the missing ingredient across almost every lineage simultaneously. They are interpreters tolerant of open worlds. They produce semantic meaning from unstructured data. They can read affordance descriptions and act on them. They are the observers that blackboard AI needed, the readers that tuple spaces lacked, the meaning-producers that artificial life could not have, the situated reasoners that make environment-mediated coordination viable without brittle pattern matching or centralized scheduling.
+
+This is why the architecture becomes possible now and not in 1986 or 1997 or 2023. The computational environment finally matches the conceptual model.
 
 ---
 
-## V. State as Substrate
+## VI. State as Substrate
 
 Sync is a small system — ten HTTP endpoints, a single SQLite table, an expression engine — built on the premise that the architecture these games and research traditions were reaching for can now actually be constructed.
 
@@ -127,18 +156,20 @@ A **room** in sync is a shared key-value store partitioned into scopes. There is
 
 An agent's entire lifecycle reduces to two operations:
 
-1. **Wait** — block until a condition over the room's state becomes true.
+1. **Wait** — declare a relevance predicate over the room's state, and block until the world satisfies it.
 2. **Act** — invoke an action that writes to state.
 
-No event subscriptions. No callback registration. No message routing. An agent observes the world, decides something needs doing, and does it. Then it waits again.
+The agent does not decide when to observe. The world decides when the agent is relevant. The agent does not pull information; the substrate pushes a full perceptual context — all visible state, all computed views, all available actions with their parameter schemas — when the declared condition becomes true. Between receiving that context and choosing which action to invoke, the agent reasons privately. The substrate sees only perception and action. Everything between is the agent's own cognition, invisible and unconstrained.
 
-This is the *Outer Wilds* loop made literal: the world exists; you perceive it; your understanding determines what you do next. It is Gelernter's tuple space with semantic readers. It is Hayes-Roth's opportunistic activation without the scheduling back door. It is Suchman's situated cognition operationalized as an API.
+This is the *Outer Wilds* loop made literal: the world exists; you perceive it; your understanding determines what you do next. It is Gelernter's tuple space with semantic readers. It is Hayes-Roth's opportunistic activation without the scheduling back door. It is Suchman's situated cognition operationalized as an API. It is Grassé's stigmergy implemented for language-model agents.
 
-The room is a semantic Linda. The wait condition is pattern matching. The action invocation is `out`. And the observers — the agents — are language models that can tolerate the open-world ambiguity that broke every previous attempt at controllerless coordination.
+The Cognitive Architectures for Language Agents framework (Sumers et al., 2024) distinguishes internal actions — reasoning, retrieval, reflection — from external actions on the world. In every existing agent framework, the agent manages both. In sync, the substrate takes over the external action space entirely. What remains is a clean separation: the substrate handles perception and affordances; the agent handles orientation and decision. Gibson's ecological psychology, implemented as a REST API — the `/context` endpoint is an affordance map, presenting not just the state of the world but the things the agent can do in it.
+
+And because multiple agents share the same substrate, coordination becomes a side effect of shared reality. When one agent writes, another agent's wait condition may fire. No message passes between them. No orchestrator sequences them. Each agent's action becomes part of every other agent's perceptual field. The stigmergic loop runs across all participants simultaneously.
 
 ---
 
-## VI. Delegated Capabilities
+## VII. Delegated Capabilities
 
 Actions in sync are not remote procedure calls. They are **scoped write templates** — pre-registered patterns that describe what state changes are permitted and under what conditions.
 
@@ -146,13 +177,11 @@ When Alice registers an action scoped to her own namespace, she is saying: *Here
 
 This is how *Papers, Please* works, translated into system design. The rules are explicit and structural. Authority flows through the shape of the system, not through a central adjudicator. And just as in *Papers, Please*, the interesting dynamics emerge not from any single rule but from their interaction — trust hierarchies, role-based access, multi-party workflows, all arising from the same small mechanism of scoped delegation.
 
-Each action carries its parameter schema, its precondition expression, and its write templates. It is a self-documenting affordance — Gibson and Norman's insight made executable. The `/context` endpoint that returns all available actions to an agent is literally an affordance map: given this state of the world, these are the things you can do.
-
-The ECA substitution holds here too. Sync does not automate — it does not fire actions on the agent's behalf. It *presents* available capabilities to an observer and lets the observer decide. The system shifts from automation to participation. The agent perceives and acts. The substrate enables; it does not dictate.
+Each action carries its parameter schema, its precondition expression, and its write templates. It is a self-documenting affordance — Gibson and Norman's insight made executable. Sync does not automate; it does not fire actions on the agent's behalf. It presents available capabilities and lets the observer decide. The system shifts from automation to participation. The substrate enables; it does not dictate.
 
 ---
 
-## VII. Self-Activating Surfaces
+## VIII. Self-Activating Surfaces
 
 If state is the substrate, **surfaces** are the organisms that grow on it.
 
@@ -160,70 +189,105 @@ A surface is a UI component — a markdown panel, a metric display, an action bu
 
 This is the mechanism *A Dark Room* was simulating. When the fire is lit, a new panel appears — not because a script fires a transition, but because the conditions for that panel's existence have become true. The difference is that in sync, this is genuine. A game master agent can introduce a new surface at any time, and nothing already present needs to change. The system grows by accretion. New layers of interface accumulate like sediment, exactly as the player *felt* they did in *A Dark Room*, except now the geology is real.
 
-This is also opportunistic activation — Hayes-Roth's program, finally realized without the scheduling back door. Surfaces activate when `enabled(state)` becomes true. No dispatcher selects them. No orchestrator sequences them. The departure from the blackboard architecture is precise: the knowledge sources are no longer hand-coded pattern matchers. They are declarative predicates over a shared substrate, evaluated by an expression engine, observed by agents that can tolerate ambiguity and interpret meaning.
+Seven design principles govern the accumulation. *Absence is signal* — an unset key is meaningful, not an error. *Locality of reasoning* — each surface is understandable in isolation. *Additive composition* — new pieces never modify existing pieces. *Display versus gate state* — what determines visibility is separate from what determines appearance. These are the conditions under which a self-assembling interface remains coherent as it grows.
 
-Seven design principles govern the accumulation. *Absence is signal* — an unset key is meaningful, not an error. *Locality of reasoning* — each surface is understandable in isolation. *Additive composition* — new pieces never modify existing pieces. *Display versus gate state* — what determines visibility is separate from what determines appearance. These are the conditions under which a self-assembling interface remains coherent as it grows — the architectural constraints that prevent the reef from collapsing into chaos.
-
-Reynolds' boids followed local rules and produced flocking. Sync's surfaces follow local activation contracts and produce interfaces. The difference is that surfaces carry *meaning*. A narrative surface renders a story. A metric surface highlights significance. An action-bar surface presents agency. The emergent structure is not a flock — it is a story, a game, a workflow, a collaborative investigation. This is what artificial life could not achieve: emergent structure that is also semantically coherent to human participants.
+Reynolds' boids followed local rules and produced flocking. Sync's surfaces follow local activation contracts and produce interfaces. The difference is that surfaces carry meaning. A narrative surface renders a story. A metric surface highlights significance. An action-bar surface presents agency. The emergent structure is not a flock — it is a story, a game, a workflow, a collaborative investigation. This is what artificial life could not achieve: emergent structure that is also semantically coherent to human participants.
 
 ---
 
-## VIII. Interpretation as Architecture
+## IX. Interpretation as Architecture
 
 Raw state is not always legible. A key containing the integer `3` is a fact, but not yet a meaning. Sync introduces **views** — declarative expressions that project private state into public interpretations. A view might compute `"critical"` when health drops below a threshold, or `"ready"` when all prerequisites are met. Views are evaluated per-agent, respecting scope privacy: each participant sees the room through the lens of what they are permitted to know, with interpretive layers turning raw facts into semantic understanding.
 
 This is interpretation made structural — not buried in application logic but declared, inspectable, composable. FRP proposed that behavior is a function of time-varying values; sync's views are that insight made narratively legible. A surface's enabled expression reads like a sentence about the world, not like a signal graph. The tradeoff is real — you lose FRP's compositionality guarantees and its formal reasoning about time. What you gain is a model that agents and humans can both interpret.
 
-It is also the bridge between the *Outer Wilds* insight and a multi-agent system. In *Outer Wilds*, progress is understanding; in sync, understanding must be computed, scoped, and shared selectively. The interpretation layer is what makes the shift from command-response software to perception-adaptation software possible.
+It is the bridge between the *Outer Wilds* insight and a multi-agent system. In *Outer Wilds*, progress is understanding; in sync, understanding must be computed, scoped, and shared selectively.
 
-Second-order cybernetics — von Foerster's study of systems that observe themselves observing — reaches its architectural expression here. The `_dashboard` configuration that defines what surfaces exist and how they activate is itself stored in the substrate's state. The UI definition is state. State mutations reshape the UI. The system observes its own observation layer and can modify it. A surface can render a control panel that reconfigures which surfaces appear. This is self-description made operational: the system contains its own interface specification as mutable fact.
-
----
-
-## IX. Where the Model Breaks
-
-The intellectual honesty of this project requires naming the pressure points — the places where the substrate thesis is known to come under stress.
-
-David Harel invented **statecharts** (1987) because pure reactive systems become incomprehensible at scale. Statecharts add hierarchy, explicit transitions, and deterministic semantics. The substrate thesis rejects centralized transitions — surfaces activate based on local conditions, not explicit state edges. But every large reactive system eventually rediscovers the need for phase structure. What starts as an emergent reef eventually needs someone to say "we are now in the endgame, and these three things must happen in this order."
-
-Sync acknowledges this through **organs** — bounded regions of sequential, non-monotonic logic that resolve constraints and emit updated facts. The organ handles the exclusive, imperative mechanics. The reef never sees them — only the resulting truth propagates. But the prediction is clear: organs will appear sooner and more often than the pure-substrate vision suggests. The question is whether organ boundaries can remain local or whether they eventually reconnect into something resembling a global statechart.
-
-Enterprise **workflow systems** learned a painful lesson over three decades: emergence is flexible, but auditability and guarantees matter. When something goes wrong — and it will — you need to answer: who caused this change? Can we replay the sequence? Can we prove that certain invariants were maintained? Sync's audit log records every action invocation, but audit logging is the easy part. The hard questions are about invariants: can the system guarantee that a resource is never double-claimed? That a phase transition is irreversible? Currently, sync handles these through precondition expressions and version checks — sufficient for cooperative agents, untested under adversarial conditions.
-
-The most theoretically significant pressure comes from the **CALM theorem** (Hellerstein, 2010): programs that are logically monotonic — that only accumulate facts, never retract them — do not require coordination for consistency. Monotonic programs are eventually consistent without locks, barriers, or consensus protocols.
-
-The substrate thesis is implicitly chasing monotonicity. Additive surfaces, append-only audit logs, accumulating state entries — these are all monotonic patterns. When the substrate grows only by addition, coordination is unnecessary, exactly as CALM predicts. But non-monotonic operations — deletion, replacement, counter resets — require coordination. This is *precisely* why organs appear: they are the coordination boundaries around non-monotonic operations. An organ resolves a constraint and emits a monotonic fact that the rest of the substrate can safely observe.
-
-CALM provides the formal foundation for the intuition that substrates scale compositionally while organs handle guarantees. It also predicts exactly where the architecture will need explicit coordination: wherever facts must be retracted rather than accumulated. The substrate thesis is, in a sense, distributed consistency theory rediscovered through interaction design.
+Second-order cybernetics — von Foerster's study of systems that observe themselves observing — reaches its architectural expression here. The `_dashboard` configuration that defines what surfaces exist and how they activate is itself stored in the substrate's state. The UI definition is state. State mutations reshape the UI. The system observes its own observation layer and can modify it. This is self-description made operational: the system contains its own interface specification as mutable fact.
 
 ---
 
-## X. Toward a Formal Ground
+## X. Where the Model Breaks
+
+The intellectual honesty of this project requires naming the pressure points.
+
+David Harel invented **statecharts** (1987) because pure reactive systems become incomprehensible at scale. The substrate thesis rejects centralized transitions — surfaces activate based on local conditions, not explicit state edges. But every large reactive system eventually rediscovers the need for phase structure. Sync acknowledges this through **organs** — bounded regions of sequential, non-monotonic logic that resolve constraints and emit updated facts. The prediction is clear: organs will appear sooner and more often than the pure-substrate vision suggests.
+
+Enterprise **workflow systems** learned over three decades that emergence is flexible, but auditability and guarantees matter. Sync's audit log records every action invocation, but the hard questions are about invariants: can the system guarantee that a resource is never double-claimed? That a phase transition is irreversible? Currently, sync handles these through precondition expressions and version checks — sufficient for cooperative agents, untested under adversarial conditions.
+
+The most theoretically significant pressure comes from the **CALM theorem** (Hellerstein, 2010): programs that are logically monotonic — that only accumulate facts, never retract them — do not require coordination for consistency. The substrate thesis is implicitly chasing monotonicity. Additive surfaces, append-only audit logs, accumulating state entries — these are all monotonic patterns. But non-monotonic operations — deletion, replacement, counter resets — require coordination. This is precisely why organs appear: they are the coordination boundaries around non-monotonic operations. An organ resolves a constraint and emits a monotonic fact that the rest of the substrate can safely observe.
+
+CALM provides the formal foundation for the intuition that substrates scale compositionally while organs handle guarantees. It also predicts exactly where the architecture will need explicit coordination: wherever facts must be retracted rather than accumulated.
+
+---
+
+## XI. Toward a Formal Ground
 
 The most ambitious part of this work is an attempt to give the substrate thesis a minimal formal foundation — the **sigma calculus** — analogous to what lambda calculus is for computation and pi calculus is for mobile processes.
 
-Five term forms: **fact** (a situated datum), **write** (a guarded state transition), **observe** (a guarded read), **parallel composition**, and **scope** (an authority boundary). Two reduction rules: activation and observation. Seven algebraic laws, the most consequential being that composition is commutative (order of assembly doesn't matter), observers are independent (adding one cannot change the substrate's evolution), and monotonic writes are confluent (they reach the same result regardless of order — CALM recast as an algebraic property).
+Five term forms: **fact**, **write**, **observe**, **parallel composition**, and **scope**. Two reduction rules: activation and observation. Seven algebraic laws, the most consequential being that composition is commutative, observers are independent, and monotonic writes are confluent — CALM recast as an algebraic property. Organs — bounded regions of non-monotonic computation — are expressible as scoped terms whose internal complexity is hidden behind additive external interfaces. Four Lean files begin to mechanize these properties. Three theorems are proved; three more await their proofs.
 
-The calculus captures the distinction between monotonic and non-monotonic operations structurally. Organs — bounded regions of non-monotonic computation — are expressible as scoped terms whose internal complexity is hidden behind additive external interfaces. Four Lean files begin to mechanize these properties. Three theorems are proved; three more await their proofs.
-
-Whether the formalization succeeds on its own mathematical terms remains to be seen. But the ambition matters: it asserts that emergence is not mystical, not merely aesthetic, but a phenomenon with structure precise enough to be captured in algebra and verified by machine.
+Whether the formalization succeeds on its own terms remains to be seen. The ambition matters: it asserts that emergence is not mystical, not merely aesthetic, but a phenomenon with structure precise enough to be captured in algebra and verified by machine.
 
 ---
 
-## XI. What Becomes True
+## XII. A REPL for the Mind
+
+Steve Jobs called the computer "a bicycle for the mind" — an amplifier for human cognitive capability, the way a bicycle amplifies human locomotion. The metaphor assumes a single rider, a single destination, a tool that extends one person's reach.
+
+Sync suggests a different metaphor. Not a bicycle — a vehicle that takes you somewhere — but a **REPL**: a read-evaluate-print loop, an interactive environment where you express something, the world responds, and the response reshapes your next expression. The REPL is not a tool you use to accomplish a goal. It is a medium you think in. The loop between perception and action is not a means to an end; it is the cognitive process itself.
+
+Clark and Chalmers argued that if an external resource plays the same functional role as an internal cognitive process, it is part of cognition. The notebook is part of memory. The calculator is part of arithmetic. The room — the shared state substrate — is part of *understanding*. An agent's context window, loaded with the room's state, views, and affordances, is not a representation of reality that the agent reasons *about*. It is the cognitive environment the agent reasons *within*. The substrate is not a bicycle that takes cognition somewhere. It is the medium in which cognition happens.
+
+When multiple agents share that medium, each agent's action becomes part of every other agent's perceptual field. Understanding is no longer private — it is distributed across the substrate, accumulating through the stigmergic traces of every participant's reasoning. The REPL becomes multiplayer. The loop between perception and action runs not inside one mind but across many, with the shared state as the connective tissue.
+
+This is what the Generative Agents experiment demonstrated empirically: twenty-five agents, perceiving a shared environment, produced emergent social behavior that no single agent intended or controlled. The REPL ran across all of them simultaneously, with the environment as the shared evaluation context.
+
+---
+
+## XIII. What Becomes True
 
 One question disciplines the entire framework: **is orchestration fundamentally unnecessary, or merely delayed?**
 
 Every previous generation believed emergence would replace coordination. Every generation eventually reintroduced structure. HEARSAY-II's controllerless model got a scheduler. Actor systems got supervision trees. Microservices got service meshes. The pattern is consistent enough to be a law.
 
-The honest answer is that the likely equilibrium is not pure substrate and not pure orchestration. It is substrate for exploration and composition, organs for guarantees and invariants, interpretation for meaning and perception, and agents as adaptive glue between layers. The programmer does not disappear — they move one layer down the stack, from scripting behavior to shaping the conditions under which behavior can arise.
+The honest answer is that the likely equilibrium is not pure substrate and not pure orchestration. It is substrate for exploration and composition, organs for guarantees and invariants, interpretation for meaning and perception, and agents as adaptive glue between layers.
 
-Looking back through this lineage, *A Dark Room* feels less like an incremental game and more like a prototype for a different philosophy of interface. *Papers, Please* reads as an exploration of truth negotiated through structure. *Outer Wilds* becomes an experiment in knowledge as the only form of progress that matters. The blackboard researchers were building the workspace. Gelernter was building the coordination primitive. Gibson was describing the perceptual model. Suchman was describing the cognition. Harel and Hellerstein were mapping the boundary conditions. Each saw a piece. None had the observer.
+Looking back through this lineage, *A Dark Room* feels less like an incremental game and more like a prototype for a different philosophy of interface. *Papers, Please* reads as an exploration of truth negotiated through structure. *Outer Wilds* becomes an experiment in knowledge as the only form of progress that matters. The blackboard researchers were building the workspace. Gelernter was building the coordination primitive. Gibson was describing the perceptual model. Suchman was describing the cognition. Harel and Hellerstein were mapping the boundary conditions. Park's Generative Agents proved the thesis empirically. Each saw a piece. None had the observer — or the infrastructure.
 
 Now the observer exists, and sync is an early attempt to build the architecture that all of them were reaching toward. Ten endpoints. One table. A conviction that if you get the shared state right, coordination takes care of itself.
 
 The goal is no longer to construct sequences of events, but to create environments where understanding itself can grow — where meaning emerges not from what the system tells you next, but from what becomes true when you are paying attention.
 
 ---
+
+## References
+
+- Yao, S., et al. (2023). "ReAct: Synergizing Reasoning and Acting in Language Models." ICLR 2023. arXiv:2210.03629.
+- Park, J.S., et al. (2023). "Generative Agents: Interactive Simulacra of Human Behavior." UIST 2023. arXiv:2304.03442.
+- Wu, Q., et al. (2023). "AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation." arXiv:2308.08155.
+- Hong, S., et al. (2023). "MetaGPT: Meta Programming for Multi-Agent Collaborative Framework." arXiv:2308.00352.
+- Li, G., et al. (2023). "CAMEL: Communicative Agents for Mind Exploration of Large Language Model Society." NeurIPS 2023.
+- Wang, G., et al. (2023). "Voyager: An Open-Ended Embodied Agent with Large Language Models." arXiv:2305.16291.
+- Shinn, N., et al. (2023). "Reflexion: Language Agents with Verbal Reinforcement Learning." NeurIPS 2023.
+- Schick, T., et al. (2023). "Toolformer: Language Models Can Teach Themselves to Use Tools." arXiv:2302.04761.
+- Sumers, T.R., et al. (2024). "Cognitive Architectures for Language Agents." arXiv:2309.02427.
+- Nii, H.P. (1986). "The Blackboard Model of Problem Solving." AI Magazine 7(2).
+- Hayes-Roth, B. (1985). "Blackboard Architecture for Control." Journal of Artificial Intelligence 26.
+- Gelernter, D. (1985). "Generative Communication in Linda." ACM TOPLAS 7(1).
+- Elliott, C. & Hudak, P. (1997). "Functional Reactive Animation." ICFP.
+- Hewitt, C. (1973). "A Universal Modular ACTOR Formalism." IJCAI.
+- Gibson, J.J. (1979). *The Ecological Approach to Visual Perception.* Houghton Mifflin.
+- Norman, D. (1988). *The Design of Everyday Things.* Basic Books.
+- Suchman, L. (1987). *Plans and Situated Actions.* Cambridge University Press.
+- Clark, A. & Chalmers, D. (1998). "The Extended Mind." Analysis 58(1).
+- Grassé, P.-P. (1959). "La reconstruction du nid et les coordinations interindividuelles." Insectes Sociaux 6(1).
+- Hellerstein, J. (2010). "The Declarative Imperative." SIGMOD Record 39(1).
+- Harel, D. (1987). "Statecharts: A Visual Formalism for Complex Systems." Science of Computer Programming 8(3).
+- Von Foerster, H. (1974). *Cybernetics of Cybernetics.* University of Illinois.
+- Langton, C. (1989). *Artificial Life.* Addison-Wesley.
+- Reynolds, C. (1987). "Flocks, Herds, and Schools: A Distributed Behavioral Model." SIGGRAPH.
+- Bratman, M. (1987). *Intention, Plans, and Practical Reason.* Harvard University Press.
+- Brooks, R. (1986). "A Robust Layered Control System for a Mobile Robot." IEEE Journal of Robotics and Automation 2(1).
 
 *March 2026*
