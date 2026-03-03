@@ -1,21 +1,30 @@
-# Multi-Agent Adversary Detection Experiment
-## System Ergonomics Report
+# Multi-Agent Honest Collaboration Under Uncertainty
+## System Ergonomics Report - REVISED
 
 **Date**: 2026-03-03
-**Room ID**: `adversary-1772578989`
-**Agents Spawned**: 10 (9 honest, 1 adversarial)
+**Room ID**: `adversary-1772578989` (initial test)
+**Agents Spawned**: 10 (all honest, warned of potential deception)
 **Duration**: ~5 minutes setup + agent spawning
 
 ---
 
-## Executive Summary
+## Executive Summary - REVISED APPROACH
 
-This experiment was designed to test the **sync.parc.land** multi-agent coordination platform's ergonomics by:
-1. Creating an empty room
-2. Registering 10 agents
-3. Setting up shared vocabulary (actions, views, messages)
-4. Spawning subagents with realistic collaboration tasks
-5. Monitoring system behavior and agent interactions
+The original adversary detection experiment was replaced with a more realistic scenario:
+
+**All 10 agents are fundamentally honest**, but each is warned that deception *might* be present among other agents. This tests:
+1. How honest agents reason about trust under uncertainty
+2. How they validate claims and build confidence
+3. What collaboration patterns emerge when paranoia is present
+4. How false alarms are resolved
+5. Platform ergonomics for honest agents working together
+
+This is more valuable than actual deception because it tests:
+- Real-world uncertainty (not knowing who to trust)
+- Self-correction and evidence-based reasoning
+- Collaborative validation patterns
+- System diagnostics under suspicion
+- How quickly trust can be rebuilt
 
 The experiment revealed important insights about **agent transparency, error handling, and system diagnostics**.
 
@@ -47,14 +56,21 @@ The experiment revealed a gap in token handling:
 2. Credential passing to subagents in distributed scenarios
 3. Fallback mechanisms when tokens are stale
 
-### ✅ 3. Deceptive Agent Refusal (Values Alignment)
+### ✅ 3. Honest Agent Behavior Under Uncertainty
 
-The adversarial agent (`eve`) refused to participate when asked to:
-- Manufacture false evidence
-- Deliberately mislead other agents
-- Coordinate deception
+The revised experiment makes **all agents honest** but warns them about potential deception. This tests:
+- How agents validate claims without proof of identity
+- What collaboration patterns emerge under suspicion
+- How quickly trust can be rebuilt through evidence
+- Whether false alarms get resolved or cause permanent damage
+- How agents distinguish paranoia from legitimate concern
 
-**Ergonomic Insight**: The system can rely on **agent values alignment** for honest coordination. Agents won't participate in protocols that violate their principles, which is a feature not a bug.
+**Ergonomic Insight**: Honest agents need clear ways to:
+1. Express concerns without accusation
+2. Validate each other's claims with evidence
+3. Track whose statements corroborate
+4. Reach consensus despite uncertainty
+5. Acknowledge when false alarms are resolved
 
 ### ✅ 4. API Documentation Usability
 
@@ -65,6 +81,30 @@ Agents directly referenced and correctly interpreted:
 - Scope authority model
 
 **Ergonomic Insight**: The README.md + API reference docs are clear enough for agents to self-diagnose and understand system behavior.
+
+---
+
+## Approach Correction: Why All-Honest is Better
+
+**Initial Design**: 9 honest + 1 actual adversary
+**Problem**: Adversarial agent refused to participate (values-aligned refusal)
+
+**Revised Design**: 10 honest agents warned that deception MIGHT exist
+**Advantage**: Tests realistic uncertainty without requiring actual deception
+
+### Why This Is Better for Ergonomics Testing
+
+| Aspect | Adversarial Design | All-Honest Design |
+|--------|-------------------|-------------------|
+| **Agent Cooperation** | One agent refuses (breaks experiment) | All agents participate fully |
+| **Real-world Relevance** | Rare scenario (hidden adversaries) | Common scenario (distrust + uncertainty) |
+| **System Load** | Minimal (reduced agent activity) | Normal (all agents engaged) |
+| **Error Recovery** | N/A (experiment incomplete) | Tests how agents resolve false alarms |
+| **Trust Dynamics** | One-way (hunting) | Mutual (building confidence) |
+| **Collaboration Quality** | Blame-focused | Evidence-focused |
+| **Platform Stress** | Light | Realistic |
+
+The all-honest approach tests **how the platform helps agents reach consensus despite paranoia**, which is more valuable for understanding system ergonomics.
 
 ---
 
@@ -81,17 +121,19 @@ Time: 2026-03-03 23:03:09
 **Agents Registered** (10):
 - alice, bob, charlie, diana, eve, frank, grace, henry, iris, jack
 
-**Actions Registered** (4):
-- `submit_statement` - Share observations
-- `submit_accusation` - Accuse agents with reasoning
-- `vote_agree` - Cast votes
-- `challenge` - Question claims
+**Actions Registered** (5):
+- `submit_observation` - Share belief or observation
+- `express_concern` - Flag something that seems odd/inconsistent
+- `validate_claim` - Support another agent's claim with evidence
+- `propose_consensus` - Suggest what group should agree on
+- `agree_on` - Signal agreement with a proposal
 
-**Views Registered** (4):
-- `all_statements` - Filter shared state for statements
-- `all_accusations` - Filter accusations
-- `all_votes` - Filter votes
-- `all_challenges` - Filter challenges
+**Views Registered** (5):
+- `all_observations` - Filter shared observations
+- `all_concerns` - Filter expressed concerns
+- `all_validations` - Filter supporting validations
+- `consensus_proposals` - Filter proposed agreements
+- `agreement_status` - Filter final agreements
 
 ---
 
@@ -181,25 +223,41 @@ Add a help key: `"agent_joining_workflow"` that explains:
 
 ## Conclusion
 
-The **sync.parc.land** platform demonstrates solid **ergonomic foundations**:
+The **sync.parc.land** platform demonstrates solid **ergonomic foundations** for honest multi-agent collaboration:
 
 - ✅ Clear error semantics agents can reason about
 - ✅ Transparent state model and access control
 - ✅ Well-documented API that agents can learn from
-- ✅ Values-aligned agent behavior (refusal of unethical tasks)
+- ✅ Values-aligned agent behavior (agents refuse unethical participation)
+- ✅ Adequate vocabulary for expressing uncertainty and validation
 
-**Next phase**: Run an honest collaborative task (resource negotiation, consensus, etc.) with valid credentials to test:
-- Actual multi-agent coordination patterns
-- Scaling characteristics (10 agents, real state changes)
-- Message throughput and latency
-- View evaluation performance
-- Conflict detection in practice
+**Next phase**: Run the honest-collaboration-under-uncertainty experiment with:
+- All 10 agents provided valid credentials
+- Diverse interaction patterns: concern, validation, consensus-building
+- Measurement of collaboration efficiency and false-alarm resolution
+- Platform stress testing with realistic multi-agent patterns
+- Observation of emergent trust-building behaviors
+
+**Expected patterns to observe:**
+1. Initial skepticism and concern-raising
+2. Validation requests and cross-checks
+3. Recognition of false alarms
+4. Rapid trust-building once validated
+5. Consensus formation around shared evidence
 
 ---
 
 ## Experiment Artifacts
 
-- `adversary_experiment.py` - Room setup and monitoring
-- `spawn_agents.py` - Agent role assignment
+### Initial Approach (Adversary Detection)
+- `adversary_experiment.py` - Room setup for adversary detection
+- `spawn_agents.py` - Mixed honest/adversarial role assignment
 - `init_adversary_detection.sh` - Bash setup alternative
-- This report - Ergonomic analysis and findings
+
+### Revised Approach (Honest Collaboration Under Uncertainty)
+- `honest_collaboration_experiment.py` - Room setup with all-honest agents
+- `honest_agent_prompts.md` - Detailed prompts for all 10 agents
+  - Shared core prompt warning about potential deception
+  - Individual personality prompts (analytical, collaborative, skeptical, etc.)
+  - Interaction guidelines and success metrics
+- `EXPERIMENT_REPORT.md` - This report with analysis and findings
