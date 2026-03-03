@@ -1,15 +1,32 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
 import { useState, useEffect, useCallback } from "https://esm.sh/react@18.2.0";
 import { styled } from "../styled.ts";
+import { processMermaidBlocks, runMermaid } from "../mermaid.ts";
 
 // ── Raw URL mapping ─────────────────────────────────────────────────────────
 
 const DOC_META: Record<string, { title: string; rawPath: string }> = {
   "SKILL.md":    { title: "Orchestrator Skill",  rawPath: "/SKILL.md" },
-  "api.md":      { title: "API Reference",       rawPath: "/reference/api.md" },
+  "api.md":      { title: "API Reference",        rawPath: "/reference/api.md" },
   "cel.md":      { title: "CEL Reference",        rawPath: "/reference/cel.md" },
   "examples.md": { title: "Examples",             rawPath: "/reference/examples.md" },
+  "v6.md":       { title: "Architecture",         rawPath: "/reference/v6.md" },
+  "views.md":    { title: "Views Reference",      rawPath: "/reference/views.md" },
+  "help.md":     { title: "Help Reference",       rawPath: "/reference/help.md" },
+  "landing.md":  { title: "Landing",              rawPath: "/reference/landing.md" },
 };
+
+/** Rewrite *.md hrefs in rendered HTML to /?doc=filename so links work
+ *  in DocViewer. Strips any path prefix (e.g. reference/api.md → api.md).
+ *  Raw links between files at /reference/*.md keep working because the
+ *  server serves them at their natural paths — only DocViewer-rendered
+ *  links need rewriting. */
+function rewriteDocLinks(html: string): string {
+  return html.replace(
+    /href="([^"]*?)([^"/]+\.md)"/g,
+    (_match, _prefix, filename) => `href="/?doc=${filename}"`,
+  );
+}
 
 // ── Styled ──────────────────────────────────────────────────────────────────
 
@@ -212,6 +229,13 @@ const Prose = styled.div`
     margin: 2rem 0;
   }
 
+  .mermaid {
+    margin: 1.25rem 0;
+    text-align: center;
+    overflow-x: auto;
+    svg { max-width: 100%; height: auto; }
+  }
+
   img { max-width: 100%; border-radius: 6px; }
 
   @media (max-width: 480px) {
@@ -251,6 +275,10 @@ export function DocViewer({ docId }: { docId: string }) {
   const rawUrl = meta ? `${location.origin}${meta.rawPath}` : null;
 
   useEffect(() => {
+    if (html) runMermaid();
+  }, [html]);
+
+  useEffect(() => {
     if (!meta || !rawUrl) {
       setError(`Unknown document: ${docId}`);
       return;
@@ -263,7 +291,7 @@ export function DocViewer({ docId }: { docId: string }) {
         return r.text();
       })
       .then((md) => {
-        const rendered = marked.parse(md, { breaks: false, gfm: true });
+        const rendered = rewriteDocLinks(processMermaidBlocks(marked.parse(md, { breaks: false, gfm: true })));
         setHtml(rendered);
       })
       .catch((e) => setError(`Failed to load ${docId}: ${e.message}`));

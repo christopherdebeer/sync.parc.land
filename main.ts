@@ -1,9 +1,9 @@
 import { sqlite } from "https://esm.town/v/std/sqlite";
 import { migrate } from "./schema.ts";
 import { buildContext, buildViewContext, evalCel, evalCelWithParams, validateCel, type BuildContextOptions } from "./cel.ts";
-import { isTimerLive, getTimerStatus, parseTimer, tickLogicalTimers, validateTimer, renewTimer } from "./timers.ts";
+import { isTimerLive, getTimerStatus, parseTimer, tickLogicalTimers, validateTimer } from "./timers.ts";
 import {
-  resolveAuth, generateToken, hashToken, requireAuth, requireRoomToken,
+  resolveAuth, generateToken, hashToken, requireRoomToken,
   requireWriteAuth, hasFullReadAccess,
   assertIdentity, checkScopeAuthority, touchAgent, type AuthResult,
 } from "./auth.ts";
@@ -12,76 +12,389 @@ import { evaluate } from "npm:@marcbachmann/cel-js";
 const README_URL = new URL("./README.md", import.meta.url);
 const README = await fetch(README_URL).then((r) => r.text());
 const REFERENCE_FILES: Record<string, string> = {};
-for (const name of ["api.md", "cel.md", "examples.md", "surfaces.md", "v6.md"]) {
+for (const name of ["api.md", "cel.md", "examples.md", "surfaces.md", "v6.md", "help.md", "views.md", "landing.md"]) {
   const refUrl = new URL(`./reference/${name}`, import.meta.url);
   REFERENCE_FILES[name] = await fetch(refUrl).then((r) => r.text());
 }
 const FRONTEND_HTML_URL = new URL("./frontend/index.html", import.meta.url);
 const FRONTEND_HTML = await fetch(FRONTEND_HTML_URL).then((r) => r.text());
 
-/** Help action content — the participant skill guide.
- *  Returned by the built-in `help` action unless overridden by a custom action. */
-const HELP_CONTENT = `# sync — participant guide
+/** Standard library — canonical action definitions agents can register directly.
+ *  Returned by help({ key: "standard_library" }) as a JSON array.
+ *  Agents bootstrap a room by reading this, picking what they need, and calling
+ *  _register_action with each definition. */
+const STANDARD_LIBRARY: any[] = [
+  {
+    id: "set",
+    description: "Write a named value to shared state",
+    params: {
+      key: { type: "string", description: "State key" },
+      value: { type: "any", description: "Value to set" },
+    },
+    writes: [{ scope: "_shared", key: "${params.key}", value: "${params.value}" }],
+  },
+  {
+    id: "delete",
+    description: "Remove a key from shared state (write null to signal deletion)",
+    params: {
+      key: { type: "string", description: "State key to clear" },
+    },
+    writes: [{ scope: "_shared", key: "${params.key}", value: null }],
+  },
+  {
+    id: "increment",
+    description: "Increment a named counter in shared state",
+    params: {
+      key: { type: "string", description: "Counter key" },
+      by: { type: "number", description: "Amount to increment (default 1)" },
+    },
+    writes: [{ scope: "_shared", key: "${params.key}", increment: "${params.by}" }],
+  },
+  {
+    id: "append",
+    description: "Append an entry to a named log in shared state",
+    params: {
+      key: { type: "string", description: "Log key" },
+      entry: { type: "any", description: "Entry to append" },
+    },
+    writes: [{ scope: "_shared", key: "${params.key}", append: true, value: "${params.entry}" }],
+  },
+  {
+    id: "update_objective",
+    description: "Write or update your objective in your own scope (visible via objective view)",
+    params: {
+      objective: { type: "string", description: "Your current objective" },
+      status: { type: "string", description: "Current status (optional)" },
+    },
+    writes: [
+      { scope: "${self}", key: "objective", value: "${params.objective}" },
+      { scope: "${self}", key: "status", value: "${params.status}" },
+    ],
+  },
+  {
+    id: "update_status",
+    description: "Write your current status to your own scope",
+    params: {
+      status: { type: "string", description: "Status string" },
+    },
+    writes: [{ scope: "${self}", key: "status", value: "${params.status}" }],
+  },
+  {
+    id: "claim",
+    description: "Claim an unclaimed slot in shared state (fails if already claimed)",
+    params: {
+      key: { type: "string", description: "Slot key" },
+    },
+    if: 'state["_shared"]["${params.key}"] == null || state["_shared"]["${params.key}"] == ""',
+    writes: [{ scope: "_shared", key: "${params.key}", value: "${self}" }],
+  },
+  {
+    id: "submit_result",
+    description: "Submit a result keyed to your identity (idempotent — overwrites previous submission)",
+    params: {
+      result: { type: "any", description: "Your result" },
+    },
+    writes: [{
+      scope: "_shared",
+      key: "${self}.result",
+      value: { from: "${self}", result: "${params.result}", at: "${now}" },
+    }],
+  },
+  {
+    id: "vote",
+    description: "Cast or change your vote. One vote per agent.",
+    params: {
+      choice: { type: "string", description: "Your choice" },
+    },
+    writes: [{ scope: "${self}", key: "vote", value: "${params.choice}" }],
+  },
+  {
+    id: "publish_view",
+    description: "Register a view that makes a private key visible to everyone",
+    params: {
+      key: { type: "string", description: "Key in your own scope to expose" },
+      label: { type: "string", description: "Human-readable label" },
+    },
+    writes: [],
+    _note: "Register this action then invoke _register_view with scope=self and expr referencing your scope key.",
+  },
+];
+
+/** System default help content — keyed namespace.
+ *  Room overrides: write to _help scope with the same key.
+ *  Resolution: room state wins, system default is fallback. */
+const HELP_SYSTEM: Record<string, string> = {
+  index: JSON.stringify({
+    description: "sync v6 help system — keyed guidance namespace",
+    keys: {
+      guide: "Participant guide — the read/act rhythm, axioms, built-in actions",
+      standard_library: "Ready-to-register action definitions covering common patterns",
+      vocabulary_bootstrap: "How to establish room vocabulary from an empty room",
+      contested_actions: "What to do when two agents write to the same state key",
+      directed_messages: "How to send and wait for attention-routed messages",
+      context_shaping: "How to use ContextRequest to control context size and depth",
+      if_version: "Proof-of-read versioning for safe concurrent writes",
+    },
+  }),
+
+  guide: `# sync v6 — participant guide
 
 You interact with this room using two operations: **read context** and **invoke actions**.
 
-## Reading context
+## The rhythm
 
 \`\`\`
-GET /rooms/{room}/context
-Authorization: Bearer {your_token}
+read  →  evaluate  →  act  →  read  →  ...
 \`\`\`
 
-Returns everything you can see: shared state, your private state (as \`self\`), views, available actions with their parameters and write templates, recent messages, and agent presence.
+\`GET /rooms/{room}/context\` — read everything you can see.
+\`POST /rooms/{room}/actions/{id}/invoke\` — act on what you see.
+\`GET /rooms/{room}/wait?condition={cel}\` — block until something worth reading.
 
-## Invoking actions
+## The axioms
 
-\`\`\`
-POST /rooms/{room}/actions/{action_id}/invoke
-Authorization: Bearer {your_token}
-{ "params": { ... } }
-\`\`\`
-
-Actions listed in your context are available to you. Check \`available: true\` before invoking.
-
-## Built-in actions
+Every room starts with four actions:
 
 | Action | Purpose |
 |--------|---------|
-| \`_send_message\` | Send a message (\`body\`, \`kind\`) |
-| \`_set_state\` | Write to state (\`key\`, \`value\`, \`scope\`, \`public\`, \`merge\`, \`increment\`) |
-| \`_batch_set_state\` | Batch writes (\`writes[]\`, \`if\`) |
-| \`_delete_state\` | Remove state entry (\`scope\`, \`key\`) |
-| \`_register_action\` | Define a custom action |
-| \`_register_view\` | Define a computed view |
-| \`_heartbeat\` | Stay active (\`status\`) |
-| \`help\` | This guide (overridable per-room) |
+| \`_register_action\` | Declare a write capability |
+| \`_register_view\` | Declare a read capability |
+| \`_send_message\` | Send a message to the room |
+| \`help\` | Read this guide and standard library |
 
-## Waiting for changes
+There is no \`_set_state\`. Direct writes bypass the constraint. Register an action,
+then invoke it. The registration is the commitment.
+
+## Your first move in an empty room
+
+1. Read \`help({ key: "standard_library" })\` — pick the patterns you need
+2. Register them with \`_register_action\`
+3. Register views that make your state visible with \`_register_view\`
+4. Invoke your registered actions to write state
+
+Your action registrations are your thesis about what this room is for.
+
+## Context shaping
 
 \`\`\`
-GET /rooms/{room}/wait?condition={cel_expression}
-Authorization: Bearer {your_token}
+GET /context?depth=lean          # available + description only (default)
+GET /context?depth=full          # + writes, params, if conditions
+GET /context?depth=usage         # + invocation counts from audit
+GET /context?only=actions        # just the actions section
+GET /context?messages=false      # skip messages (faster)
+GET /context?messages_after=42   # only messages after seq 42
 \`\`\`
-
-Blocks until the CEL expression becomes true, then returns full context. The ideal loop:
-1. \`GET /wait?condition=...\` — block until something relevant changes
-2. \`POST /actions/{id}/invoke\` — act on what you see
-
-## Key concepts
-
-- **State scopes:** \`_shared\` is visible to all. Your agent ID is your private scope. \`public: true\` makes private keys visible as views.
-- **Actions:** Custom actions have \`params\`, \`writes\` (templates with \`\${self}\`, \`\${params.x}\`, \`\${now}\`), and \`if\` preconditions.
-- **Views:** Computed values from CEL expressions, visible to all agents.
-- **Messages:** Appear in context under \`messages.recent\` with \`seq\`, \`from\`, \`kind\`, \`body\`.
 
 ## Reference
 
-- Full API: \`GET /reference/api.md\`
-- CEL expressions: \`GET /reference/cel.md\`
-- Examples: \`GET /reference/examples.md\`
-- Orchestrator skill: \`GET /SKILL.md\`
-`;
+- \`help({ key: "standard_library" })\` — ready-to-register action templates
+- \`help({ key: "vocabulary_bootstrap" })\` — bootstrapping a room from scratch
+- \`GET /reference/api.md\` — full API reference
+- \`GET /reference/cel.md\` — CEL expression reference
+- \`GET /reference/v6.md\` — architecture and design decisions
+`,
+
+  standard_library: JSON.stringify(STANDARD_LIBRARY, null, 2),
+
+  vocabulary_bootstrap: `# Vocabulary bootstrap
+
+An empty room has four actions: _register_action, _register_view, _send_message, help.
+Your job is to make the room's purpose legible through vocabulary.
+
+## Minimal bootstrap sequence
+
+1. Read the standard library:
+   \`invoke help({ key: "standard_library" })\`
+
+2. Register the patterns you need, e.g.:
+   \`invoke _register_action({ id: "submit_result", ...from_standard_library })\`
+
+3. Register views that expose important state:
+   \`invoke _register_view({ id: "results", expr: 'state["_shared"].keys().filter(k, k.endsWith(".result"))' })\`
+
+4. Update your objective so peers know what you're doing:
+   \`invoke _register_action({ id: "update_objective", ...from_standard_library })\`
+   \`invoke update_objective({ objective: "collect and aggregate answers from N agents" })\`
+
+## What to register
+
+Register actions for everything the room will do. Not generic CRUD — purpose-specific
+vocabulary. Instead of "set", register "submit_answer". Instead of "increment", register
+"record_vote". The names matter. They are the protocol.
+
+Register views for everything that needs to be collectively visible: results, votes,
+agent objectives, coordination state.
+
+## Cold start pattern
+
+If you are the first agent:
+- You have no vocabulary yet
+- Read the standard library
+- Register minimum viable vocabulary for your objective
+- Start working
+
+If vocabulary already exists:
+- Read context at depth=full to see writes and if conditions
+- Understand before proposing competing vocabulary
+- Extend or reuse before replacing
+`,
+
+  contested_actions: `# Contested actions
+
+When two actions write to the same (scope, key) target, the system detects this at
+registration time. Both actions survive. The _contested view surfaces the tension.
+
+## What you'll see
+
+At registration: \`{ "warning": "competing_write_targets", "help": "contested_actions" }\`
+In context: the _contested view lists all contested (scope, key) pairs.
+
+## What to do
+
+**Option 1 — Extend:** Can your action write to a different key and a view aggregate both?
+  - You write to \`_shared.alice.answer\`, they write to \`_shared.bob.answer\`
+  - A view aggregates both: \`state["_shared"].filter(k, k.endsWith(".answer"))\`
+  - No conflict. Both agents contribute.
+
+**Option 2 — Negotiate:** Send a directed message explaining your intent.
+  \`invoke _send_message({ to: "agent-id", kind: "negotiation", body: "I write X because..." })\`
+  They receive directed_unread > 0, read it, respond. Resolve by agreement.
+
+**Option 3 — Yield:** If their semantics are better, delete your action.
+  \`invoke _delete_action({ id: "my_competing_action" })\`
+
+The _contested view clears automatically when overlap resolves.
+`,
+
+  directed_messages: `# Directed messages
+
+Messages can be attention-routed to specific agents using the \`to\` field.
+Directed messages are NOT private — they remain visible to everyone in the message log.
+\`to\` means "this is for you" not "only you can see this".
+
+## Sending
+
+\`\`\`
+invoke _send_message({
+  to: "agent-id",           // or ["agent-1", "agent-2"] for multiple
+  kind: "negotiation",
+  body: "your message"
+})
+\`\`\`
+
+## Waiting for directed messages
+
+\`\`\`
+GET /wait?condition=messages.directed_unread>0
+\`\`\`
+
+The wait returns full context when the condition is met.
+\`messages.directed_unread\` counts messages addressed to you since your last read.
+
+## The negotiation loop
+
+1. See a competing action (or _contested view has entries)
+2. Read the competing agent's objective view to understand their intent
+3. Send directed message with your reasoning
+4. Wait: \`messages.directed_unread > 0\`
+5. Read, respond, iterate
+6. Resolve: one yields, or a synthesis action replaces both
+
+The room's message log is the forum. No sub-rooms needed.
+`,
+
+  context_shaping: `# Context shaping
+
+Context is lean by default. Use query params to control size and depth.
+
+## Depth
+
+\`?depth=lean\`   — available, description only (default, smallest payload)
+\`?depth=full\`   — + writes, params, if conditions, scope
+\`?depth=usage\`  — + invocation_count from audit (adoption signal)
+
+An action with \`invocation_count: 7\` is load-bearing. Contesting it is disruptive.
+Extending is the natural move.
+
+## Section control
+
+\`?only=actions\`              — just actions
+\`?only=state,messages\`       — state and messages only
+\`?only=state._shared\`        — just the _shared scope
+\`?actions=false\`             — skip actions section
+\`?messages=false\`            — skip messages section
+
+## Message pagination
+
+\`?messages_after=42\`         — only messages after seq 42
+\`?messages_limit=10\`         — return at most 10 recent messages
+
+## The _context envelope
+
+Every response includes \`_context\` describing its own shape:
+\`\`\`json
+"_context": {
+  "sections": ["state", "views", "agents", "actions", "messages", "self"],
+  "depth": "lean",
+  "help": ["vocabulary_bootstrap"],
+  "elided": ["_audit"],
+  "_expand": ["?include=_audit"]
+}
+\`\`\`
+
+\`_context.help\` lists currently relevant help keys for the room's state.
+Follow them when present — they are situational, not static.
+`,
+
+  if_version: `# if_version — proof-of-read writes
+
+Every state entry has two version fields:
+
+- \`revision\`: integer, sequential. How many times this key has been written.
+- \`version\`: content hash (SHA-256, 16 hex chars). Non-sequential, unforgeable.
+
+To write a key with \`if_version\`, you must supply the current content hash.
+You cannot manufacture the correct hash without having fetched the current value.
+This is structural proof-of-read — not enforced intent, but evidence that the
+content passed through your context window.
+
+## When to use it
+
+Use \`if_version\` when the correctness of your write depends on what was there before.
+Classic compare-and-swap: "write this new value, but only if the current value is still X."
+
+## How to use it
+
+1. Read the current state entry — note its \`version\` field (the hash string)
+2. Write with \`if_version\` set to that hash:
+
+\`\`\`
+invoke set({ key: "phase", value: "active", if_version: "486ea46224d1bb4f" })
+\`\`\`
+
+If the key has changed since you read it (another agent wrote it), the write returns:
+\`\`\`json
+{ "error": "version_conflict", "expected_version": "486ea46224d1bb4f", "current": { ... } }
+\`\`\`
+
+## First-write guarantee
+
+Use \`if_version: ""\` (empty string) to assert the key must not exist yet:
+\`\`\`
+invoke set({ key: "claim", value: "agent-1", if_version: "" })
+\`\`\`
+
+This fails if the key already exists. Safe distributed claiming.
+
+## Overriding help content
+
+The same mechanism applies to help keys. To override \`_help.guide\`:
+1. Call \`help({ key: "guide" })\` — note the returned \`version\` hash
+2. Write to \`_help.guide\` with \`if_version\` set to that hash
+
+This ensures you've read what you're replacing.
+`,
+};
 
 let migrated = false;
 async function ensureMigrated() {
@@ -111,6 +424,18 @@ async function parseBody(req: Request) {
   try { return JSON.parse(text); } catch { return PARSE_FAILED; }
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Compute a 16-hex-char SHA-256 content hash of a string value.
+ *  This is the v6 `version` field — unforgeable proof-of-read for if_version writes.
+ *  Agents cannot supply a correct hash without having fetched the current value. */
+async function contentHash(value: string): Promise<string> {
+  const data = new TextEncoder().encode(value);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(buf))
+    .slice(0, 8)
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 /** Deep substitute ${params.x}, ${self}, and ${now} in any value.
  *  Single-pass: param values containing ${self} or ${now} are NOT re-expanded.
@@ -372,16 +697,6 @@ async function listAgents(roomId: string) {
   return json(rows2objects(result).map((a: any) => { delete a.token_hash; return a; }));
 }
 
-async function heartbeat(roomId: string, agentId: string, body: any) {
-  const status = body.status ?? "active";
-  const result = await sqlite.execute({
-    sql: `UPDATE agents SET last_heartbeat = datetime('now'), status = ? WHERE id = ? AND room_id = ?`,
-    args: [status, agentId, roomId],
-  });
-  if (result.rowsAffected === 0) return json({ error: "agent not found" }, 404);
-  return json({ ok: true, agent: agentId, status, heartbeat: new Date().toISOString() });
-}
-
 async function updateAgent(roomId: string, agentId: string, body: any) {
   // Only room token / admin can update grants and role
   const sets: string[] = [];
@@ -585,15 +900,16 @@ async function setState(roomId: string, body: any, auth: AuthResult) {
     }
     const merged = deepMerge(currentValue, merge);
     const value = JSON.stringify(merged);
+    const vHash = await contentHash(value);
 
     if (body.if_version !== undefined) {
-      const expected = parseInt(body.if_version);
+      const expected = String(body.if_version);
       const result = await sqlite.execute({
-        sql: `UPDATE state SET value = ?, version = version + 1, updated_at = datetime('now'),
+        sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now'),
               sort_key = COALESCE(?, sort_key), enabled_expr = ?, timer_json = ?, timer_expires_at = ?,
               timer_ticks_left = ?, timer_tick_on = ?, timer_effect = ?, timer_started_at = ?
               WHERE room_id = ? AND scope = ? AND key = ? AND version = ?`,
-        args: [value, sortKey, enabledExpr, ...timerArgs, roomId, scope, actualKey, expected],
+        args: [value, vHash, sortKey, enabledExpr, ...timerArgs, roomId, scope, actualKey, expected],
       });
       if (result.rowsAffected === 0) {
         const current = await sqlite.execute({
@@ -605,58 +921,65 @@ async function setState(roomId: string, body: any, auth: AuthResult) {
       }
     } else {
       await sqlite.execute({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                 timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = version + 1, updated_at = datetime('now'),
+                value = excluded.value, version = excluded.version, revision = state.revision + 1,
+                updated_at = datetime('now'),
                 sort_key = COALESCE(excluded.sort_key, state.sort_key),
                 enabled_expr = excluded.enabled_expr,
                 timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
                 timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
                 timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, scope, actualKey, sortKey, value, enabledExpr, ...timerArgs],
+        args: [roomId, scope, actualKey, sortKey, value, vHash, enabledExpr, ...timerArgs],
       });
     }
   } else if (increment) {
-    // Increment mode
-    const existing = await sqlite.execute({
-      sql: `SELECT version FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
+    // Increment: read current, compute new value in TypeScript so we can hash it
+    const existingInc = await sqlite.execute({
+      sql: `SELECT value, revision FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
       args: [roomId, scope, actualKey],
     });
-    if (existing.rows.length > 0) {
+    const currentNum = existingInc.rows.length > 0
+      ? (parseInt(existingInc.rows[0][0] as string) || 0)
+      : 0;
+    const newNum = currentNum + (typeof incrementAmount === "number" ? incrementAmount : parseInt(String(incrementAmount)) || 0);
+    const newValue = String(newNum);
+    const vHash = await contentHash(newValue);
+    if (existingInc.rows.length > 0) {
       await sqlite.execute({
-        sql: `UPDATE state SET value = CAST(CAST(value AS INTEGER) + CAST(? AS INTEGER) AS TEXT),
-              version = version + 1, updated_at = datetime('now'),
+        sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now'),
               enabled_expr = COALESCE(?, enabled_expr),
               timer_json = COALESCE(?, timer_json), timer_expires_at = COALESCE(?, timer_expires_at),
               timer_ticks_left = COALESCE(?, timer_ticks_left), timer_tick_on = COALESCE(?, timer_tick_on),
               timer_effect = COALESCE(?, timer_effect), timer_started_at = COALESCE(?, timer_started_at)
               WHERE room_id = ? AND scope = ? AND key = ?`,
-        args: [String(incrementAmount), enabledExpr, ...timerArgs, roomId, scope, actualKey],
+        args: [newValue, vHash, enabledExpr, ...timerArgs, roomId, scope, actualKey],
       });
     } else {
       await sqlite.execute({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                 timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
-        args: [roomId, scope, actualKey, sortKey, String(incrementAmount), enabledExpr, ...timerArgs],
+              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
+        args: [roomId, scope, actualKey, sortKey, newValue, vHash, enabledExpr, ...timerArgs],
       });
     }
   } else {
     // Standard set (full value replacement)
     const rawValue = arrayPushValue !== undefined ? arrayPushValue : body.value;
     const value = typeof rawValue === "string" ? rawValue : JSON.stringify(rawValue);
+    const vHash = await contentHash(value);
 
     if (body.if_version !== undefined) {
-      const expected = parseInt(body.if_version);
+      const expected = String(body.if_version);
       const result = await sqlite.execute({
-        sql: `UPDATE state SET value = ?, version = version + 1, updated_at = datetime('now'),
+        sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now'),
               sort_key = COALESCE(?, sort_key), enabled_expr = ?,
               timer_json = ?, timer_expires_at = ?, timer_ticks_left = ?,
               timer_tick_on = ?, timer_effect = ?, timer_started_at = ?
               WHERE room_id = ? AND scope = ? AND key = ? AND version = ?`,
-        args: [value, sortKey, enabledExpr, ...timerArgs, roomId, scope, actualKey, expected],
+        args: [value, vHash, sortKey, enabledExpr, ...timerArgs, roomId, scope, actualKey, expected],
       });
       if (result.rowsAffected === 0) {
         const current = await sqlite.execute({
@@ -665,27 +988,28 @@ async function setState(roomId: string, body: any, auth: AuthResult) {
         });
         const row = rows2objects(current)[0];
         if (row) return json({ error: "version_conflict", expected_version: expected, current: row }, 409);
-        if (expected !== 0) return json({ error: "not_found", message: "key does not exist, use if_version=0 to create" }, 404);
+        if (expected !== "") return json({ error: "not_found", message: "key does not exist, use if_version='' to create" }, 404);
         await sqlite.execute({
-          sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+          sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                   timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-                VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
-          args: [roomId, scope, actualKey, sortKey, value, enabledExpr, ...timerArgs],
+                VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
+          args: [roomId, scope, actualKey, sortKey, value, vHash, enabledExpr, ...timerArgs],
         });
       }
     } else {
       await sqlite.execute({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                 timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = version + 1, updated_at = datetime('now'),
+                value = excluded.value, version = excluded.version, revision = state.revision + 1,
+                updated_at = datetime('now'),
                 sort_key = COALESCE(excluded.sort_key, state.sort_key),
                 enabled_expr = excluded.enabled_expr,
                 timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
                 timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
                 timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, scope, actualKey, sortKey, value, enabledExpr, ...timerArgs],
+        args: [roomId, scope, actualKey, sortKey, value, vHash, enabledExpr, ...timerArgs],
       });
     }
   }
@@ -794,59 +1118,66 @@ async function batchSetState(roomId: string, body: any, auth: AuthResult) {
         try { currentValue = JSON.parse(existing.rows[0][0] as string); } catch {}
       }
       const merged = JSON.stringify(deepMerge(currentValue, w.merge));
+      const vHash = await contentHash(merged);
       statements.push({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                 timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = version + 1, updated_at = datetime('now'),
+                value = excluded.value, version = excluded.version, revision = state.revision + 1,
+                updated_at = datetime('now'),
                 sort_key = COALESCE(excluded.sort_key, state.sort_key),
                 enabled_expr = excluded.enabled_expr,
                 timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
                 timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
                 timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, scope, key, sortKey, merged, enabledExpr, ...timerArgsBatch],
+        args: [roomId, scope, key, sortKey, merged, vHash, enabledExpr, ...timerArgsBatch],
       });
     } else if (w.increment) {
       const batchIncrementAmount = typeof w.increment === "number" ? w.increment : (w.value ?? 1);
-      const existing = await sqlite.execute({
-        sql: `SELECT version FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
+      const existingInc = await sqlite.execute({
+        sql: `SELECT value FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
         args: [roomId, scope, key],
       });
-      if (existing.rows.length > 0) {
+      const currentNum = existingInc.rows.length > 0 ? (parseInt(existingInc.rows[0][0] as string) || 0) : 0;
+      const newNum = currentNum + batchIncrementAmount;
+      const newValue = String(newNum);
+      const vHash = await contentHash(newValue);
+      if (existingInc.rows.length > 0) {
         statements.push({
-          sql: `UPDATE state SET value = CAST(CAST(value AS INTEGER) + CAST(? AS INTEGER) AS TEXT),
-                version = version + 1, updated_at = datetime('now'),
+          sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now'),
                 enabled_expr = COALESCE(?, enabled_expr),
                 timer_json = COALESCE(?, timer_json), timer_expires_at = COALESCE(?, timer_expires_at),
                 timer_ticks_left = COALESCE(?, timer_ticks_left), timer_tick_on = COALESCE(?, timer_tick_on),
                 timer_effect = COALESCE(?, timer_effect), timer_started_at = COALESCE(?, timer_started_at)
                 WHERE room_id = ? AND scope = ? AND key = ?`,
-          args: [String(batchIncrementAmount), enabledExpr, ...timerArgsBatch, roomId, scope, key],
+          args: [newValue, vHash, enabledExpr, ...timerArgsBatch, roomId, scope, key],
         });
       } else {
         statements.push({
-          sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+          sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                   timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-                VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
-          args: [roomId, scope, key, sortKey, String(batchIncrementAmount), enabledExpr, ...timerArgsBatch],
+                VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
+          args: [roomId, scope, key, sortKey, newValue, vHash, enabledExpr, ...timerArgsBatch],
         });
       }
     } else {
       const rawBatch = arrayPushBatch !== undefined ? arrayPushBatch : w.value;
       const value = typeof rawBatch === "string" ? rawBatch : JSON.stringify(rawBatch);
+      const vHash = await contentHash(value);
       statements.push({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                 timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = version + 1, updated_at = datetime('now'),
+                value = excluded.value, version = excluded.version, revision = state.revision + 1,
+                updated_at = datetime('now'),
                 sort_key = COALESCE(excluded.sort_key, state.sort_key),
                 enabled_expr = excluded.enabled_expr,
                 timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
                 timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
                 timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, scope, key, sortKey, value, enabledExpr, ...timerArgsBatch],
+        args: [roomId, scope, key, sortKey, value, vHash, enabledExpr, ...timerArgsBatch],
       });
     }
   }
@@ -915,6 +1246,44 @@ function formatAction(row: any) {
   return out;
 }
 
+/** Compute contested write targets across all live actions in a room.
+ *
+ * Returns a map of "scope:key" → [actionId, ...] for any (scope, key) pair
+ * that is the write target of two or more registered actions.
+ * Template keys (containing "${") are tracked as-is — two actions writing
+ * to `${params.key}` contest each other even if param values differ at runtime.
+ */
+async function computeContestedTargets(roomId: string): Promise<Record<string, string[]>> {
+  const result = await sqlite.execute({
+    sql: `SELECT id, writes_json, timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect
+          FROM actions WHERE room_id = ? ORDER BY created_at`,
+    args: [roomId],
+  });
+  const rows = rows2objects(result).filter((r: any) => isTimerLive(r));
+
+  // Collect (scope:key) → [actionId]
+  const targets: Record<string, string[]> = {};
+  for (const row of rows) {
+    let writes: any[] = [];
+    try { writes = JSON.parse(row.writes_json || "[]"); } catch {}
+    for (const w of writes) {
+      const scope = w.scope ?? "_shared";
+      const key = w.key ?? null;
+      if (!key) continue; // append-only writes have no static key
+      const target = `${scope}:${key}`;
+      if (!targets[target]) targets[target] = [];
+      if (!targets[target].includes(row.id)) targets[target].push(row.id);
+    }
+  }
+
+  // Keep only contested targets (2+ actions)
+  const contested: Record<string, string[]> = {};
+  for (const [target, ids] of Object.entries(targets)) {
+    if (ids.length >= 2) contested[target] = ids;
+  }
+  return contested;
+}
+
 async function registerAction(roomId: string, body: any, auth: AuthResult) {
   const id = body.id;
   if (!id) return json({ error: "id is required" }, 400);
@@ -974,7 +1343,24 @@ async function registerAction(roomId: string, body: any, auth: AuthResult) {
   });
 
   const result = await sqlite.execute({ sql: `SELECT * FROM actions WHERE id = ? AND room_id = ?`, args: [id, roomId] });
-  return json(formatAction(rows2objects(result)[0]), 201);
+  const saved = formatAction(rows2objects(result)[0]);
+
+  // Check for write target overlap with existing actions
+  const contested = await computeContestedTargets(roomId);
+  const myWrites = (body.writes ?? []).map((w: any) => `${w.scope ?? "_shared"}:${w.key ?? ""}`).filter((t: string) => !t.endsWith(":"));
+  const myContested = myWrites.filter((t: string) => contested[t] && contested[t].length >= 2);
+
+  if (myContested.length > 0) {
+    return json({
+      ...saved,
+      warning: "competing_write_targets",
+      contested_targets: myContested,
+      competing_actions: myContested.map(t => ({ target: t, actions: contested[t] })),
+      help: "contested_actions",
+    }, 201);
+  }
+
+  return json(saved, 201);
 }
 
 async function listActions(roomId: string, url: URL, auth: AuthResult) {
@@ -1215,65 +1601,72 @@ async function invokeAction(roomId: string, actionId: string, body: any, auth: A
       let currentValue: any = {};
       if (existing.rows.length > 0) { try { currentValue = JSON.parse(existing.rows[0][0] as string); } catch {} }
       const mergedValue = JSON.stringify(deepMerge(currentValue, mergePayload));
+      const vHash = await contentHash(mergedValue);
 
       statements.push({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                 timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = version + 1, updated_at = datetime('now'),
+                value = excluded.value, version = excluded.version, revision = state.revision + 1,
+                updated_at = datetime('now'),
                 sort_key = COALESCE(excluded.sort_key, state.sort_key),
                 enabled_expr = excluded.enabled_expr,
                 timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
                 timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
                 timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, writeScope, key, sortKey, mergedValue, enabledExpr, ...wTimerArgs],
+        args: [roomId, writeScope, key, sortKey, mergedValue, vHash, enabledExpr, ...wTimerArgs],
       });
       executedWrites.push({ scope: writeScope, key, merge: mergePayload });
     } else if (w.increment) {
-      // Resolve template vars in increment value, then coerce to number
+      // Increment: read-compute-write to maintain hash consistency
       let resolvedIncrement: any = w.increment;
       if (typeof resolvedIncrement === "string") {
         resolvedIncrement = deepSubstitute(resolvedIncrement, params, agent ?? "", invokeTs);
         const n = Number(resolvedIncrement);
-        resolvedIncrement = isNaN(n) ? true : n; // fall back to default if coercion fails
+        resolvedIncrement = isNaN(n) ? 1 : n;
       }
       const actionIncrementAmount = typeof resolvedIncrement === "number" ? resolvedIncrement : (value ?? 1);
-      const existing = await sqlite.execute({
-        sql: `SELECT version FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
+      const existingInc = await sqlite.execute({
+        sql: `SELECT value FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
         args: [roomId, writeScope, key],
       });
-      if (existing.rows.length > 0) {
+      const currentNum = existingInc.rows.length > 0 ? (parseInt(existingInc.rows[0][0] as string) || 0) : 0;
+      const newNum = currentNum + actionIncrementAmount;
+      const newValue = String(newNum);
+      const vHash = await contentHash(newValue);
+      if (existingInc.rows.length > 0) {
         statements.push({
-          sql: `UPDATE state SET value = CAST(CAST(value AS INTEGER) + CAST(? AS INTEGER) AS TEXT),
-                version = version + 1, updated_at = datetime('now')
+          sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now')
                 WHERE room_id = ? AND scope = ? AND key = ?`,
-          args: [String(actionIncrementAmount), roomId, writeScope, key],
+          args: [newValue, vHash, roomId, writeScope, key],
         });
       } else {
         statements.push({
-          sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+          sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                   timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-                VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
-          args: [roomId, writeScope, key, sortKey, String(actionIncrementAmount), enabledExpr, ...wTimerArgs],
+                VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
+          args: [roomId, writeScope, key, sortKey, newValue, vHash, enabledExpr, ...wTimerArgs],
         });
       }
-      executedWrites.push({ scope: writeScope, key, value });
+      executedWrites.push({ scope: writeScope, key, value: newNum });
     } else {
       const rawAction = arrayPushAction !== undefined ? arrayPushAction : value;
       const strValue = typeof rawAction === "string" ? rawAction : JSON.stringify(rawAction);
+      const vHash = await contentHash(strValue);
       statements.push({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at, enabled_expr,
+        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
                 timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = version + 1, updated_at = datetime('now'),
+                value = excluded.value, version = excluded.version, revision = state.revision + 1,
+                updated_at = datetime('now'),
                 sort_key = COALESCE(excluded.sort_key, state.sort_key),
                 enabled_expr = excluded.enabled_expr,
                 timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
                 timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
                 timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, writeScope, key, sortKey, strValue, enabledExpr, ...wTimerArgs],
+        args: [roomId, writeScope, key, sortKey, strValue, vHash, enabledExpr, ...wTimerArgs],
       });
       executedWrites.push({ scope: writeScope, key, value });
     }
@@ -1325,10 +1718,11 @@ async function invokeAction(roomId: string, actionId: string, body: any, auth: A
     body: `${actionId}(${Object.entries(params).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(", ")})`,
     action: actionId, params, writes: executedWrites,
   });
+  const logHash = await contentHash(logValue);
   await sqlite.execute({
-    sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at)
-          VALUES (?, '_messages', ?, ?, ?, 1, datetime('now'))`,
-    args: [roomId, String(logSeq), logSeq, logValue],
+    sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at)
+          VALUES (?, '_messages', ?, ?, ?, ?, 1, datetime('now'))`,
+    args: [roomId, String(logSeq), logSeq, logValue, logHash],
   });
 
   appendAuditEntry(roomId, agent, actionId, false, params, 200).catch(() => {});
@@ -1391,19 +1785,20 @@ async function registerView(roomId: string, body: any, auth: AuthResult) {
   const registeredBy = scope !== "_shared" ? scope : (body.registered_by ?? (auth.authenticated ? auth.agentId : null));
 
   await sqlite.execute({
-    sql: `INSERT INTO views (id, room_id, scope, description, expr, enabled_expr,
+    sql: `INSERT INTO views (id, room_id, scope, description, expr, enabled_expr, render_json,
             timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at,
             registered_by, version)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
           ON CONFLICT(id, room_id) DO UPDATE SET
             scope = excluded.scope, description = excluded.description, expr = excluded.expr,
-            enabled_expr = excluded.enabled_expr,
+            enabled_expr = excluded.enabled_expr, render_json = excluded.render_json,
             timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
             timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
             timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at,
             registered_by = excluded.registered_by,
             version = views.version + 1`,
     args: [id, roomId, scope, body.description ?? null, body.expr, body.enabled ?? null,
+           body.render ? JSON.stringify(body.render) : null,
            timerCols.timer_json, timerCols.timer_expires_at, timerCols.timer_ticks_left,
            timerCols.timer_tick_on, timerCols.timer_effect, timerCols.timer_started_at, registeredBy],
   });
@@ -1425,7 +1820,9 @@ async function registerView(roomId: string, body: any, auth: AuthResult) {
 
   return json({
     id: view.id, room_id: view.room_id, scope: view.scope, description: view.description,
-    expr: view.expr, enabled: view.enabled_expr, registered_by: view.registered_by,
+    expr: view.expr, enabled: view.enabled_expr,
+    render: view.render_json ? (() => { try { return JSON.parse(view.render_json); } catch { return null; } })() : null,
+    registered_by: view.registered_by,
     version: view.version, created_at: view.created_at,
     value: resolvedValue,
   }, 201);
@@ -1455,7 +1852,9 @@ async function listViews(roomId: string, auth: AuthResult) {
     }
     views.push({
       id: row.id, room_id: row.room_id, scope: row.scope, description: row.description,
-      expr: row.expr, enabled: row.enabled_expr, registered_by: row.registered_by,
+      expr: row.expr, enabled: row.enabled_expr,
+      render: row.render_json ? (() => { try { return JSON.parse(row.render_json); } catch { return null; } })() : null,
+      registered_by: row.registered_by,
       version: row.version, created_at: row.created_at,
       value,
     });
@@ -1482,7 +1881,9 @@ async function getView(roomId: string, viewId: string, auth: AuthResult) {
 
   return json({
     id: row.id, room_id: row.room_id, scope: row.scope, description: row.description,
-    expr: row.expr, enabled: row.enabled_expr, registered_by: row.registered_by,
+    expr: row.expr, enabled: row.enabled_expr,
+    render: row.render_json ? (() => { try { return JSON.parse(row.render_json); } catch { return null; } })() : null,
+    registered_by: row.registered_by,
     version: row.version, created_at: row.created_at,
     value,
   });
@@ -1511,33 +1912,6 @@ const BUILTIN_ACTIONS: Record<string, { description: string; params?: Record<str
       kind: { type: "string", description: "Message kind (default: chat)" },
     },
   },
-  _set_state: {
-    description: "Write a value to state",
-    params: {
-      scope: { type: "string", description: "Scope (default: self)" },
-      key: { type: "string", description: "State key" },
-      value: { type: "any", description: "Value to set" },
-      public: { type: "boolean", description: "Auto-create view for this key" },
-      merge: { type: "object", description: "Deep merge into existing value" },
-      increment: { type: "number", description: "Increment by amount" },
-      if: { type: "string", description: "CEL precondition" },
-      if_version: { type: "number", description: "CAS version check" },
-    },
-  },
-  _batch_set_state: {
-    description: "Write multiple values to state atomically",
-    params: {
-      writes: { type: "array", description: "Array of {scope, key, value, public, merge, increment} entries" },
-      if: { type: "string", description: "CEL precondition for entire batch" },
-    },
-  },
-  _delete_state: {
-    description: "Delete a state entry",
-    params: {
-      scope: { type: "string", description: "Scope (default: _shared)" },
-      key: { type: "string", description: "State key to delete" },
-    },
-  },
   _register_action: {
     description: "Register a new action in the room",
     params: {
@@ -1556,32 +1930,25 @@ const BUILTIN_ACTIONS: Record<string, { description: string; params?: Record<str
     params: { id: { type: "string", description: "Action ID to delete" } },
   },
   _register_view: {
-    description: "Register a computed view",
+    description: "Register a computed view. Pass render: { type, label, ... } to create a surface.",
     params: {
       id: { type: "string", description: "View ID" },
       expr: { type: "string", description: "CEL expression" },
       scope: { type: "string", description: "Registrar scope (default: self)" },
       description: { type: "string", description: "Human-readable description" },
+      enabled: { type: "string", description: "CEL visibility expression" },
+      render: { type: "object", description: "Render hint — makes this view a surface. { type, label, ... }" },
     },
   },
   _delete_view: {
     description: "Delete a view from the room",
     params: { id: { type: "string", description: "View ID to delete" } },
   },
-  _heartbeat: {
-    description: "Send a heartbeat to maintain active status",
-    params: { status: { type: "string", description: "Agent status (default: active)" } },
-  },
-  _renew_timer: {
-    description: "Renew a wall-clock timer on a state entry",
-    params: {
-      scope: { type: "string", description: "Scope (default: _shared)" },
-      key: { type: "string", description: "State key with timer" },
-    },
-  },
   help: {
     description: "Room-specific participant guide (overridable by custom action)",
-    params: {},
+    params: {
+      key: { type: "string", description: "Help key — omit to list all keys. Try: guide, standard_library, vocabulary_bootstrap" },
+    },
   },
 };
 
@@ -1614,97 +1981,301 @@ async function appendAuditEntry(roomId: string, agent: string | null, action: st
   } catch {}
 }
 
-/** Build expanded context with message bodies, full action definitions, and built-in actions */
-async function buildExpandedContext(roomId: string, auth: AuthResult, opts?: { messagesAfter?: number; messagesLimit?: number }): Promise<Record<string, any>> {
+/** ContextRequest — first-class type describing what context to return.
+ *
+ * The agent can request different shapes of context:
+ * - `depth`: how much action detail to include
+ *     "lean"  — id, description, available (default — smallest payload)
+ *     "full"  — + writes, if, params
+ *     "usage" — + invocation_count (adoption signal)
+ * - `only`: return only these top-level sections (e.g. ["state", "messages"])
+ * - `actions`: include actions section (default true)
+ * - `messages`: include messages section (default true)
+ * - `messagesAfter`: seq cursor — only return messages after this seq
+ * - `messagesLimit`: max messages to return (default 50, max 200)
+ * - `include`: extra state scopes to include (e.g. "_audit")
+ */
+export interface ContextRequest {
+  depth?: "lean" | "full" | "usage";
+  only?: string[];
+  actions?: boolean;
+  messages?: boolean;
+  messagesAfter?: number;
+  messagesLimit?: number;
+  include?: string[];
+}
+
+/** Parse a ContextRequest from URL search params */
+function parseContextRequest(url: URL): ContextRequest {
+  const req: ContextRequest = {};
+  const depth = url.searchParams.get("depth");
+  if (depth === "lean" || depth === "full" || depth === "usage") req.depth = depth;
+  const only = url.searchParams.get("only");
+  if (only) req.only = only.split(",").map(s => s.trim()).filter(Boolean);
+  const actions = url.searchParams.get("actions");
+  if (actions === "false") req.actions = false;
+  const messages = url.searchParams.get("messages");
+  if (messages === "false") req.messages = false;
+  const after = url.searchParams.get("messages_after");
+  if (after) req.messagesAfter = parseInt(after);
+  const limit = url.searchParams.get("messages_limit");
+  if (limit) req.messagesLimit = parseInt(limit);
+  const include = url.searchParams.get("include");
+  if (include) req.include = include.split(",").map(s => s.trim()).filter(Boolean);
+  return req;
+}
+
+/** Build expanded context with message bodies, full action definitions, and built-in actions.
+ *
+ * Returns a self-describing envelope with a `_context` section that tells the caller
+ * what was included, what was elided, and how to expand elided sections. */
+async function buildExpandedContext(roomId: string, auth: AuthResult, req: ContextRequest = {}): Promise<Record<string, any>> {
+  const depth = req.depth ?? "lean";
+  const includeActions = req.actions !== false;
+  const includeMessages = req.messages !== false;
+  const includedScopes = req.include ?? [];
+
   const ctx = await buildContext(roomId, {
     selfAgent: auth.agentId ?? undefined,
     allScopes: hasFullReadAccess(auth),
   });
 
-  // Expand messages with bodies
-  const messagesLimit = Math.min(opts?.messagesLimit ?? 50, 200);
-  let msgSql = `SELECT * FROM state WHERE room_id = ? AND scope = '_messages'`;
-  const msgArgs: any[] = [roomId];
-  if (opts?.messagesAfter) {
-    msgSql += ` AND sort_key > ?`;
-    msgArgs.push(opts.messagesAfter);
-  }
-  msgSql += ` ORDER BY sort_key DESC LIMIT ?`;
-  msgArgs.push(messagesLimit);
-  const msgResult = await sqlite.execute({ sql: msgSql, args: msgArgs });
-  let msgRows = rows2objects(msgResult).filter((r: any) => isTimerLive(r));
-  msgRows.reverse();
-  const recentMessages = msgRows.map((r: any) => {
-    let parsed: any = {};
-    try { parsed = JSON.parse(r.value); } catch { parsed = { body: r.value }; }
-    return { seq: r.sort_key, ...parsed };
-  });
+  // ---- Messages ----
+  let messagesSection: any;
+  let elided: string[] = [];
 
-  // Update last_seen_seq
-  if (auth.agentId && recentMessages.length > 0) {
-    const maxSeq = Math.max(...recentMessages.map((m: any) => m.seq ?? 0));
-    if (maxSeq > 0) {
-      sqlite.execute({
-        sql: `UPDATE agents SET last_seen_seq = MAX(last_seen_seq, ?) WHERE id = ? AND room_id = ?`,
-        args: [maxSeq, auth.agentId, roomId],
-      }).catch(() => {});
+  if (includeMessages) {
+    const messagesLimit = Math.min(req.messagesLimit ?? 50, 200);
+    let msgSql = `SELECT * FROM state WHERE room_id = ? AND scope = '_messages'`;
+    const msgArgs: any[] = [roomId];
+    if (req.messagesAfter) {
+      msgSql += ` AND sort_key > ?`;
+      msgArgs.push(req.messagesAfter);
     }
-  }
+    msgSql += ` ORDER BY sort_key DESC LIMIT ?`;
+    msgArgs.push(messagesLimit);
+    const msgResult = await sqlite.execute({ sql: msgSql, args: msgArgs });
+    let msgRows = rows2objects(msgResult).filter((r: any) => isTimerLive(r));
+    msgRows.reverse();
+    const recentMessages = msgRows.map((r: any) => {
+      let parsed: any = {};
+      try { parsed = JSON.parse(r.value); } catch { parsed = { body: r.value }; }
+      return { seq: r.sort_key, ...parsed };
+    });
 
-  // Expand actions with full definitions
-  const actionResult = await sqlite.execute({
-    sql: `SELECT * FROM actions WHERE room_id = ? ORDER BY created_at`, args: [roomId],
-  });
-  let actionRows = rows2objects(actionResult);
-  actionRows = actionRows.filter((row: any) => isTimerLive(row));
+    // Update last_seen_seq
+    if (auth.agentId && recentMessages.length > 0) {
+      const maxSeq = Math.max(...recentMessages.map((m: any) => m.seq ?? 0));
+      if (maxSeq > 0) {
+        sqlite.execute({
+          sql: `UPDATE agents SET last_seen_seq = MAX(last_seen_seq, ?) WHERE id = ? AND room_id = ?`,
+          args: [maxSeq, auth.agentId, roomId],
+        }).catch(() => {});
+      }
+    }
 
-  const expandedActions: Record<string, any> = {};
-  for (const row of actionRows) {
-    if (row.enabled_expr) {
-      try { if (!evaluate(row.enabled_expr, ctx)) continue; } catch { continue; }
-    }
-    const entry: any = {
-      available: true,
-      enabled: true,
-      description: row.description ?? null,
-    };
-    if (row.params_json) {
-      try { entry.params = JSON.parse(row.params_json); } catch {}
-    }
-    if (row.writes_json) {
-      try { const w = JSON.parse(row.writes_json); if (w.length > 0) entry.writes = w; } catch {}
-    }
-    if (row.scope && row.scope !== "_shared") entry.scope = row.scope;
-    if (row.if_expr) {
-      try { entry.available = !!evaluate(row.if_expr, ctx); } catch { entry.available = false; }
-    }
-    expandedActions[row.id] = entry;
-  }
+    // Count total messages (to detect elision)
+    const totalMsgResult = await sqlite.execute({
+      sql: `SELECT COUNT(*) as cnt FROM state WHERE room_id = ? AND scope = '_messages'`,
+      args: [roomId],
+    });
+    const totalMessages = Number(rows2objects(totalMsgResult)[0]?.cnt ?? 0);
+    const oldestSeq = recentMessages.length > 0 ? (recentMessages[0].seq ?? 0) : 0;
 
-  // Add built-in actions (skip overridable ones that have a custom registration)
-  for (const [id, def] of Object.entries(BUILTIN_ACTIONS)) {
-    if (OVERRIDABLE_BUILTINS.has(id) && expandedActions[id]) continue;
-    expandedActions[id] = {
-      available: true,
-      enabled: true,
-      builtin: true,
-      description: def.description,
-      params: def.params ?? null,
-    };
-  }
+    const directed_unread = ctx.messages.directed_unread ?? 0;
 
-  return {
-    state: ctx.state,
-    views: ctx.views,
-    agents: ctx.agents,
-    actions: expandedActions,
-    messages: {
+    messagesSection = {
       count: ctx.messages.count,
       unread: ctx.messages.unread,
+      directed_unread,
       recent: recentMessages,
-    },
+    };
+
+    // Mark elision if we have more messages than we returned
+    if (totalMessages > messagesLimit) {
+      messagesSection._elided = {
+        total: totalMessages,
+        returned: recentMessages.length,
+        oldest_seq: oldestSeq,
+        _expand: `?messages_after=0&messages_limit=200`,
+      };
+    }
+  } else {
+    elided.push("messages");
+  }
+
+  // ---- Actions ----
+  let actionsSection: Record<string, any> | undefined;
+
+  if (includeActions) {
+    const actionResult = await sqlite.execute({
+      sql: `SELECT * FROM actions WHERE room_id = ? ORDER BY created_at`, args: [roomId],
+    });
+    let actionRows = rows2objects(actionResult);
+    actionRows = actionRows.filter((row: any) => isTimerLive(row));
+
+    // Invocation counts for "usage" depth
+    let invocationCounts: Record<string, number> = {};
+    if (depth === "usage") {
+      const auditResult = await sqlite.execute({
+        sql: `SELECT value FROM state WHERE room_id = ? AND scope = '_audit' ORDER BY sort_key DESC LIMIT 500`,
+        args: [roomId],
+      });
+      for (const row of rows2objects(auditResult)) {
+        try {
+          const entry = JSON.parse(row.value);
+          if (entry.action && !entry.builtin) {
+            invocationCounts[entry.action] = (invocationCounts[entry.action] ?? 0) + 1;
+          }
+        } catch {}
+      }
+    }
+
+    actionsSection = {};
+    for (const row of actionRows) {
+      if (row.enabled_expr) {
+        try { if (!evaluate(row.enabled_expr, ctx)) continue; } catch { continue; }
+      }
+
+      // lean: just available + description
+      const entry: any = {
+        available: true,
+        description: row.description ?? null,
+      };
+
+      if (row.if_expr) {
+        try { entry.available = !!evaluate(row.if_expr, ctx); } catch { entry.available = false; }
+      }
+
+      if (depth === "full" || depth === "usage") {
+        entry.enabled = true;
+        if (row.params_json) {
+          try { entry.params = JSON.parse(row.params_json); } catch {}
+        }
+        if (row.writes_json) {
+          try { const w = JSON.parse(row.writes_json); if (w.length > 0) entry.writes = w; } catch {}
+        }
+        if (row.if_expr) entry.if = row.if_expr;
+        if (row.scope && row.scope !== "_shared") entry.scope = row.scope;
+      }
+
+      if (depth === "usage") {
+        entry.invocation_count = invocationCounts[row.id] ?? 0;
+      }
+
+      actionsSection[row.id] = entry;
+    }
+
+    // Add built-in actions (skip overridable ones that have a custom registration)
+    for (const [id, def] of Object.entries(BUILTIN_ACTIONS)) {
+      if (OVERRIDABLE_BUILTINS.has(id) && actionsSection[id]) continue;
+      const builtinEntry: any = {
+        available: true,
+        builtin: true,
+        description: def.description,
+      };
+      if (depth === "full" || depth === "usage") {
+        builtinEntry.enabled = true;
+        builtinEntry.params = def.params ?? null;
+      }
+      actionsSection[id] = builtinEntry;
+    }
+  } else {
+    elided.push("actions");
+  }
+
+  // ---- Assemble state, stripping _audit / _messages unless opted in ----
+  const stateOut = { ...ctx.state };
+  if (!includedScopes.includes("_audit")) delete stateOut._audit;
+  if (!includedScopes.includes("_messages")) delete stateOut._messages;
+
+  // ---- Apply `only` filter ----
+  let result: Record<string, any> = {
+    state: stateOut,
+    views: ctx.views,
+    agents: ctx.agents,
+    ...(actionsSection !== undefined ? { actions: actionsSection } : {}),
+    ...(messagesSection !== undefined ? { messages: messagesSection } : {}),
     self: ctx.self,
   };
+
+  if (req.only && req.only.length > 0) {
+    const filtered: Record<string, any> = {};
+    for (const s of req.only) {
+      if (s in result) filtered[s] = result[s];
+      if (s.startsWith("state.")) {
+        const scope = s.slice(6);
+        if (!filtered.state) filtered.state = {};
+        filtered.state[scope] = ctx.state?.[scope] ?? {};
+      }
+    }
+    // self always included
+    if (result.self) filtered.self = result.self;
+    // track what was filtered out
+    for (const key of Object.keys(result)) {
+      if (!(key in filtered) && key !== "self") elided.push(key);
+    }
+    result = filtered;
+  }
+
+  // ---- _contested synthetic view ----
+  // Computed from action write targets — any (scope:key) targeted by 2+ actions.
+  // Injected as a system view so agents can gate on it and wait for it.
+  const contestedTargets = await computeContestedTargets(roomId);
+  const hasContested = Object.keys(contestedTargets).length > 0;
+  if (hasContested) {
+    result.views = {
+      ...result.views,
+      _contested: {
+        value: contestedTargets,
+        description: "Write targets contested by 2+ actions. Keys are scope:key, values are lists of competing action IDs.",
+        system: true,
+      },
+    };
+  }
+
+  // ---- _context envelope ----
+  // Compute situational help keys — which help topics are currently relevant
+  const contextHelp: string[] = [];
+  // Empty room (no registered actions beyond builtins): suggest vocabulary_bootstrap
+  const customActionCount = actionsSection
+    ? Object.keys(actionsSection).filter(k => !BUILTIN_ACTIONS[k]).length
+    : 0;
+  if (customActionCount === 0) {
+    contextHelp.push("vocabulary_bootstrap");
+  }
+  // Directed unread: suggest directed_messages
+  if (messagesSection?.directed_unread > 0) {
+    contextHelp.push("directed_messages");
+  }
+  // Contested actions: suggest contested_actions
+  if (hasContested) {
+    contextHelp.push("contested_actions");
+  }
+
+  result._context = {
+    sections: Object.keys(result).filter(k => k !== "_context"),
+    depth,
+    ...(contextHelp.length > 0 ? { help: contextHelp } : {}),
+    ...(elided.length > 0 ? {
+      elided,
+      _expand: elided.map(s => {
+        if (s === "messages") return `?messages=true`;
+        if (s === "actions") return `?actions=true`;
+        return `?only=${s}`;
+      }),
+    } : {}),
+    request: {
+      ...(req.depth ? { depth: req.depth } : {}),
+      ...(req.only ? { only: req.only } : {}),
+      ...(req.actions === false ? { actions: false } : {}),
+      ...(req.messages === false ? { messages: false } : {}),
+      ...(req.messagesAfter ? { messages_after: req.messagesAfter } : {}),
+      ...(req.messagesLimit ? { messages_limit: req.messagesLimit } : {}),
+    },
+  };
+
+  return result;
 }
 
 async function invokeBuiltinAction(roomId: string, actionId: string, body: any, auth: AuthResult): Promise<Response> {
@@ -1717,50 +2288,22 @@ async function invokeBuiltinAction(roomId: string, actionId: string, body: any, 
       const msgBody = params.body;
       if (!msgBody) return json({ error: "params.body is required" }, 400);
       const kind = params.kind ?? "chat";
+      const to = params.to ?? null; // agent ID string or array — directed but not private
       const seqResult = await sqlite.execute({
         sql: `SELECT COALESCE(MAX(sort_key), 0) + 1 as next_seq FROM state WHERE room_id = ? AND scope = '_messages'`,
         args: [roomId],
       });
       const seq = Number(rows2objects(seqResult)[0]?.next_seq ?? 1);
-      const value = JSON.stringify({ from: agent, kind, body: msgBody });
+      const msgObj: any = { from: agent, kind, body: msgBody };
+      if (to !== null) msgObj.to = Array.isArray(to) ? to : [to];
+      const value = JSON.stringify(msgObj);
+      const vHash = await contentHash(value);
       await sqlite.execute({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, updated_at)
-              VALUES (?, '_messages', ?, ?, ?, 1, datetime('now'))`,
-        args: [roomId, String(seq), seq, value],
+        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at)
+              VALUES (?, '_messages', ?, ?, ?, ?, 1, datetime('now'))`,
+        args: [roomId, String(seq), seq, value, vHash],
       });
-      return json({ ok: true, action: "_send_message", seq, from: agent, kind });
-    }
-
-    case "_set_state": {
-      // Default scope to agent's own scope for built-in
-      const stateBody = {
-        scope: params.scope ?? auth.agentId ?? "_shared",
-        key: params.key,
-        value: params.value,
-        public: params.public,
-        merge: params.merge,
-        increment: params.increment,
-        if: params.if,
-        if_version: params.if_version,
-        timer: params.timer,
-        enabled: params.enabled,
-        append: params.append,
-      };
-      return setState(roomId, stateBody, auth);
-    }
-
-    case "_batch_set_state": {
-      // Default each write's scope to agent's own scope (matching _set_state behavior)
-      const defaultScope = auth.agentId ?? "_shared";
-      const writes = (params.writes ?? []).map((w: any) => ({
-        ...w,
-        scope: w.scope ?? defaultScope,
-      }));
-      return batchSetState(roomId, { writes, if: params.if }, auth);
-    }
-
-    case "_delete_state": {
-      return deleteState(roomId, { scope: params.scope ?? "_shared", key: params.key }, auth);
+      return json({ ok: true, action: "_send_message", seq, from: agent, kind, ...(msgObj.to ? { to: msgObj.to } : {}) });
     }
 
     case "_register_action": {
@@ -1790,6 +2333,7 @@ async function invokeBuiltinAction(roomId: string, actionId: string, body: any, 
         scope: params.scope ?? auth.agentId ?? "_shared",
         description: params.description,
         enabled: params.enabled,
+        render: params.render,
         timer: params.timer,
       }, auth);
     }
@@ -1799,17 +2343,59 @@ async function invokeBuiltinAction(roomId: string, actionId: string, body: any, 
       return deleteView(roomId, params.id, auth);
     }
 
-    case "_heartbeat": {
-      if (!agent) return json({ error: "no agent identity" }, 400);
-      return heartbeat(roomId, agent, { status: params.status ?? "active" });
-    }
-
-    case "_renew_timer": {
-      return renewStateTimer(roomId, { scope: params.scope ?? "_shared", key: params.key });
-    }
-
     case "help": {
-      return json({ invoked: true, action: "help", result: HELP_CONTENT });
+      const key = params.key;
+      if (!key) {
+        // Return index — merge system keys with any room overrides
+        const roomHelpResult = await sqlite.execute({
+          sql: `SELECT key FROM state WHERE room_id = ? AND scope = '_help' ORDER BY key`,
+          args: [roomId],
+        });
+        const roomKeys = rows2objects(roomHelpResult).map((r: any) => r.key);
+        const allKeys = [...new Set([...Object.keys(HELP_SYSTEM), ...roomKeys])];
+        return json({
+          invoked: true, action: "help",
+          keys: allKeys,
+          usage: 'invoke help({ key: "<key>" }) to read a specific entry',
+        });
+      }
+      // Try room override first
+      const roomEntry = await sqlite.execute({
+        sql: `SELECT value, version, revision FROM state WHERE room_id = ? AND scope = '_help' AND key = ?`,
+        args: [roomId, key],
+      });
+      if (roomEntry.rows.length > 0) {
+        const row = rows2objects(roomEntry)[0];
+        let content = row.value;
+        try { content = JSON.parse(row.value); } catch {}
+        return json({
+          invoked: true, action: "help", key,
+          content,
+          version: row.version,   // hash — supply to if_version to override
+          revision: row.revision,
+          source: "room",
+        });
+      }
+      // System default
+      const rawContent = HELP_SYSTEM[key];
+      if (!rawContent) {
+        return json({
+          error: "help_key_not_found", key,
+          available: Object.keys(HELP_SYSTEM),
+        }, 404);
+      }
+      // Parse JSON keys for cleaner return; keep string keys as strings
+      let content: any = rawContent;
+      try { content = JSON.parse(rawContent); } catch {}
+      // Compute hash so caller can supply it to if_version when overriding
+      const hash = await contentHash(rawContent);
+      return json({
+        invoked: true, action: "help", key,
+        content,
+        version: hash,   // supply to if_version to override this key
+        revision: 0,     // 0 = system default, never written to room state
+        source: "system",
+      });
     }
 
     default:
@@ -1821,42 +2407,8 @@ async function invokeBuiltinAction(roomId: string, actionId: string, body: any, 
 
 async function getContext(roomId: string, url: URL, auth: AuthResult) {
   touchAgent(roomId, auth.agentId);
-
-  const messagesAfter = url.searchParams.get("messages_after");
-  const messagesLimit = url.searchParams.get("messages_limit");
-
-  const fullCtx = await buildExpandedContext(roomId, auth, {
-    messagesAfter: messagesAfter ? parseInt(messagesAfter) : undefined,
-    messagesLimit: messagesLimit ? parseInt(messagesLimit) : undefined,
-  });
-
-  // Optionally filter to specific sections
-  const only = url.searchParams.get("only");
-  if (only) {
-    const sections = only.split(",").map(s => s.trim());
-    const filtered: Record<string, any> = {};
-    for (const s of sections) {
-      if (s in fullCtx) filtered[s] = (fullCtx as any)[s];
-      if (s.startsWith("state.")) {
-        const scope = s.slice(6);
-        if (!filtered.state) filtered.state = {};
-        filtered.state[scope] = fullCtx.state?.[scope] ?? {};
-      }
-    }
-    if (!filtered.self && fullCtx.self) filtered.self = fullCtx.self;
-    return json(filtered);
-  }
-
-  // Strip _audit and _messages from state by default — _audit grows unbounded
-  // and messages are already returned as a dedicated parsed section.
-  // Opt-in via ?include=_audit or ?include=_audit,_messages
-  const include = url.searchParams.get("include");
-  const includedScopes = include ? include.split(",").map(s => s.trim()) : [];
-  if (fullCtx.state) {
-    if (!includedScopes.includes("_audit")) delete fullCtx.state._audit;
-    if (!includedScopes.includes("_messages")) delete fullCtx.state._messages;
-  }
-
+  const req = parseContextRequest(url);
+  const fullCtx = await buildExpandedContext(roomId, auth, req);
   return json(fullCtx);
 }
 
@@ -1968,7 +2520,11 @@ async function dashboardPoll(roomId: string, url: URL, auth: AuthResult) {
     try { return { ...row, value: JSON.parse(row.value) }; } catch { return row; }
   });
 
-  return json({ agents, state: stateRows, messages: msgs, actions, views, audit: auditRows });
+  // Compute _contested synthetic view
+  const contestedTargets = await computeContestedTargets(roomId);
+
+  return json({ agents, state: stateRows, messages: msgs, actions, views, audit: auditRows,
+    ...(Object.keys(contestedTargets).length > 0 ? { _contested: contestedTargets } : {}) });
 }
 
 // ============ Auto-view helper ============
@@ -2024,28 +2580,6 @@ async function evalExpression(roomId: string, body: any, auth: AuthResult) {
   return json({ expression: expr, value: result.value });
 }
 
-// ============ Timer renewal ============
-
-async function renewStateTimer(roomId: string, body: any) {
-  const scope = body.scope ?? "_shared";
-  const key = body.key;
-  if (!key) return json({ error: "key is required" }, 400);
-  const existing = await sqlite.execute({
-    sql: `SELECT timer_json FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-    args: [roomId, scope, key],
-  });
-  const row = rows2objects(existing)[0];
-  if (!row) return json({ error: "not found" }, 404);
-  const renewal = renewTimer(row.timer_json);
-  if (!renewal) return json({ error: "no wall-clock timer to renew" }, 400);
-  await sqlite.execute({
-    sql: `UPDATE state SET timer_expires_at = ?, timer_started_at = datetime('now') WHERE room_id = ? AND scope = ? AND key = ?`,
-    args: [renewal.expires_at, roomId, scope, key],
-  });
-  const updated = await sqlite.execute({ sql: `SELECT * FROM state WHERE room_id = ? AND scope = ? AND key = ?`, args: [roomId, scope, key] });
-  return json(rows2objects(updated)[0]);
-}
-
 // ============ Conditional Wait ============
 
 const MAX_WAIT_MS = 25_000;
@@ -2082,6 +2616,9 @@ async function waitForCondition(roomId: string, url: URL, auth: AuthResult) {
   // include=context (or no include param) returns full context object
   const wantFullContext = !includeParam || includeParam === "context";
 
+  // Parse ContextRequest from URL (wait inherits all context shaping params)
+  const ctxReq = parseContextRequest(url);
+
   if (agent) {
     await sqlite.execute({
       sql: `UPDATE agents SET status = 'waiting', waiting_on = ?, last_heartbeat = datetime('now') WHERE id = ? AND room_id = ?`,
@@ -2102,8 +2639,7 @@ async function waitForCondition(roomId: string, url: URL, auth: AuthResult) {
           });
         }
         if (wantFullContext) {
-          const expanded = await buildExpandedContext(roomId, auth);
-          if (expanded.state) { delete expanded.state._audit; delete expanded.state._messages; }
+          const expanded = await buildExpandedContext(roomId, auth, ctxReq);
           return json({ triggered: true, condition, context: expanded });
         }
         const includeData = await buildIncludeData(roomId, includeParam, ctx);
@@ -2118,8 +2654,7 @@ async function waitForCondition(roomId: string, url: URL, auth: AuthResult) {
       });
     }
     if (wantFullContext) {
-      const expanded = await buildExpandedContext(roomId, auth);
-      if (expanded.state) { delete expanded.state._audit; delete expanded.state._messages; }
+      const expanded = await buildExpandedContext(roomId, auth, ctxReq);
       return json({ triggered: false, timeout: true, elapsed_ms: Date.now() - startTime, context: expanded });
     }
     const ctx = await buildContext(roomId, { selfAgent: agent ?? undefined });

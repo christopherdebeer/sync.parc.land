@@ -1,12 +1,19 @@
 import { sqlite } from "https://esm.town/v/std/sqlite";
 
 /**
- * v5 unified schema.
+ * v6 unified schema.
  *
  * Core tables: rooms, agents, state, actions, views.
  * State is the substrate — messages, agent presence, shared state are all scopes in one table.
  * Actions are write capabilities. Views are read capabilities.
  * Auth: room tokens for admin, agent tokens for identity, scope grants for privileges.
+ *
+ * v6 changes:
+ * - state.revision: sequential integer counter (ordinality). state.version becomes a
+ *   content hash (unforgeable proof-of-read for if_version writes).
+ * - views.render_json: optional render hint that collapses surfaces into views.
+ *   A view with render_json is a surface. Dashboard queries views WHERE render_json IS NOT NULL.
+ * - messages: `to` field is stored in the JSON value body, no schema change needed.
  */
 
 export async function migrate() {
@@ -52,7 +59,8 @@ export async function migrate() {
         key TEXT NOT NULL,
         sort_key INTEGER,
         value TEXT NOT NULL,
-        version INTEGER DEFAULT 1,
+        version TEXT DEFAULT '',
+        revision INTEGER DEFAULT 1,
         updated_at TEXT DEFAULT (datetime('now')),
         timer_json TEXT,
         timer_expires_at TEXT,
@@ -102,6 +110,7 @@ export async function migrate() {
         description TEXT,
         expr TEXT NOT NULL,
         enabled_expr TEXT,
+        render_json TEXT,
         timer_json TEXT,
         timer_expires_at TEXT,
         timer_ticks_left INTEGER,
@@ -164,4 +173,21 @@ export async function migrate() {
   await addColumn("actions", "result_expr", "TEXT");
 
   // Views table is new — created above. No migration needed.
+
+  // ============ v5→v6 migration helpers ============
+  // state.version becomes a content hash (TEXT). Add state.revision as sequential integer.
+  // Existing integer version values are migrated: revision = version, version = '' (hash computed on next write).
+  await addColumn("state", "version", "TEXT DEFAULT ''");
+  await addColumn("state", "revision", "INTEGER DEFAULT 1");
+  // Backfill: for existing rows where revision is null/0 and version looks like an integer, copy it over
+  try {
+    await sqlite.execute({
+      sql: `UPDATE state SET revision = CAST(version AS INTEGER), version = ''
+            WHERE revision IS NULL OR revision = 0 OR revision = 1`,
+      args: [],
+    });
+  } catch (_) { /* best-effort backfill */ }
+
+  // views.render_json: render hint for surfaces-as-views
+  await addColumn("views", "render_json", "TEXT");
 }

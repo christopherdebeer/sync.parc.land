@@ -137,8 +137,9 @@ export async function buildContext(roomId: string, opts: BuildContextOptions = {
   });
   const totalCount = Number((rows2objects(countResult)[0] as any)?.total || 0);
 
-  // Unread count for self
+  // Unread + directed_unread counts for self
   let unreadCount = 0;
+  let directedUnread = 0;
   if (selfAgent) {
     const agent = agentRows.find(a => a.id === selfAgent);
     const lastSeen = agent?.last_seen_seq ?? 0;
@@ -152,6 +153,19 @@ export async function buildContext(roomId: string, opts: BuildContextOptions = {
       args: [roomId, lastSeen],
     });
     unreadCount = Number((rows2objects(unreadResult)[0] as any)?.c || 0);
+
+    // directed_unread: messages since lastSeen with to[] containing selfAgent
+    // Fetch bodies to check the JSON to field (SQLite has no native JSON array search)
+    const directedResult = await sqlite.execute({
+      sql: `SELECT value FROM state WHERE room_id = ? AND scope = '_messages' AND sort_key > ?`,
+      args: [roomId, lastSeen],
+    });
+    for (const row of rows2objects(directedResult)) {
+      try {
+        const msg = JSON.parse((row as any).value);
+        if (Array.isArray(msg.to) && msg.to.includes(selfAgent)) directedUnread++;
+      } catch { /* malformed message — skip */ }
+    }
   }
 
   // Load actions for context
@@ -178,7 +192,7 @@ export async function buildContext(roomId: string, opts: BuildContextOptions = {
     state,
     views: {},
     agents,
-    messages: { count: totalCount, unread: unreadCount },
+    messages: { count: totalCount, unread: unreadCount, directed_unread: directedUnread },
     actions: actionsCtx,
     self: selfAgent ?? "",
     params: {},
@@ -342,7 +356,7 @@ export function evalCelWithParams(
 export function validateCel(expr: string): { valid: true } | { valid: false; error: string } {
   try {
     evaluate(expr, {
-      state: {}, views: {}, agents: {}, messages: { count: 0, unclaimed: 0, unread: 0 },
+      state: {}, views: {}, agents: {}, messages: { count: 0, unclaimed: 0, unread: 0, directed_unread: 0 },
       actions: {}, params: {}, self: "",
     });
     return { valid: true };

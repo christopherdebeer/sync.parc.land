@@ -1,6 +1,7 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
-import { useState, useCallback } from "https://esm.sh/react@18.2.0";
+import { useState, useCallback, useEffect } from "https://esm.sh/react@18.2.0";
 import { styled, keyframes } from "../styled.ts";
+import { processMermaidBlocks, runMermaid } from "../mermaid.ts";
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 
@@ -170,110 +171,65 @@ const CopiedTag = styled.span`
   white-space: nowrap;
 `;
 
-// ── Concept cards ───────────────────────────────────────────────────────────
+// ── Prose (rendered markdown body) ──────────────────────────────────────────
 
-const Card = styled.div`
-  background: var(--lsurface);
-  border: 1px solid var(--lborder);
-  border-radius: 8px;
-  padding: 1.1rem 1.35rem;
-  margin-bottom: 0.75rem;
-  h3 { font-size: 0.92rem; font-weight: 600; margin-bottom: 0.35rem; }
-  p { color: var(--ldim); font-size: 0.88rem; line-height: 1.5; }
+const Prose = styled.div`
+  line-height: 1.7;
+  font-size: 0.95rem;
+  color: var(--lfg);
+
+  h2 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 2rem 0 0.75rem;
+  }
+  h3 { font-size: 1rem; font-weight: 600; margin: 1.25rem 0 0.4rem; }
+
+  p { margin: 0.5rem 0 0.9rem; }
+
+  a { color: var(--laccent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  strong { color: var(--lfg); font-weight: 600; }
+
+  ul, ol { margin: 0.5rem 0 0.9rem; padding-left: 1.5rem; }
+  li { margin: 0.3rem 0; }
+
+  pre {
+    background: var(--lsurface);
+    border: 1px solid var(--lborder);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    margin: 0.75rem 0 1.25rem;
+    line-height: 1.55;
+    -webkit-overflow-scrolling: touch;
+    code { background: none; border: none; padding: 0; color: var(--lfg); font-size: inherit; }
+  }
+
+  code {
+    background: var(--lsurface);
+    border: 1px solid var(--lborder);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+    color: var(--laccent);
+  }
+
+  hr { border: none; border-top: 1px solid var(--lborder); margin: 2rem 0; }
+
+  .mermaid {
+    margin: 1.25rem 0;
+    text-align: center;
+    overflow-x: auto;
+    svg { max-width: 100%; height: auto; }
+  }
+
   @media (max-width: 480px) {
-    padding: 0.9rem 1rem;
-  }
-`;
-
-// ── How-it-works diagram ────────────────────────────────────────────────────
-
-const Flow = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  margin: 1.25rem 0;
-  @media (max-width: 560px) {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 0;
-  }
-`;
-
-const FlowStep = styled.div`
-  background: var(--lsurface);
-  border: 1px solid var(--lborder);
-  border-radius: 6px;
-  padding: 0.5rem 0.9rem;
-  font-size: 0.85rem;
-  text-align: center;
-  min-width: 6rem;
-  span { display: block; font-size: 0.72rem; color: var(--ldim); margin-top: 0.15rem; }
-  @media (max-width: 560px) {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    text-align: left;
-    padding: 0.6rem 0.9rem;
-    border-radius: 0;
-    border-bottom: none;
-    &:first-of-type { border-radius: 6px 6px 0 0; }
-    &:last-of-type { border-radius: 0 0 6px 6px; border-bottom: 1px solid var(--lborder); }
-    span { display: inline; margin-top: 0; }
-  }
-`;
-
-const FlowArrow = styled.div`
-  color: var(--ldim);
-  font-size: 0.9rem;
-  @media (max-width: 560px) { display: none; }
-`;
-
-// ── API surface ─────────────────────────────────────────────────────────────
-
-const TwoOps = styled.p`
-  font-size: 1rem;
-  margin-bottom: 1rem;
-  strong { color: var(--laccent); }
-`;
-
-const Pre = styled.pre`
-  background: var(--lsurface);
-  border: 1px solid var(--lborder);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
-  overflow-x: auto;
-  font-size: 0.82rem;
-  margin: 1rem 0;
-  line-height: 1.55;
-  -webkit-overflow-scrolling: touch;
-  @media (max-width: 480px) {
-    padding: 0.75rem 0.9rem;
-    font-size: 0.75rem;
-  }
-`;
-
-// ── Links ───────────────────────────────────────────────────────────────────
-
-const Links = styled.div`
-  margin-top: 2rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-`;
-
-const Link = styled.a`
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  padding: 0.45rem 0;
-  color: var(--laccent);
-  font-size: 0.92rem;
-  span { color: var(--ldim); font-size: 0.82rem; }
-  @media (max-width: 480px) {
-    flex-direction: column;
-    gap: 0.1rem;
-    padding: 0.55rem 0;
+    font-size: 0.9rem;
+    pre { padding: 0.75rem 0.9rem; font-size: 0.75rem; }
   }
 `;
 
@@ -282,15 +238,6 @@ const DashHint = styled.p`
   color: var(--ldim);
   font-size: 0.88rem;
   word-break: break-all;
-`;
-
-const Divider = styled.hr`
-  border: none;
-  border-top: 1px solid var(--lborder);
-  margin: 2.5rem 0;
-  @media (max-width: 480px) {
-    margin: 2rem 0;
-  }
 `;
 
 const Footer = styled.footer`
@@ -428,24 +375,113 @@ const PromptBlockLabel = styled.div`
 const SKILL_URL = "https://sync.parc.land/SKILL.md";
 const BASE = globalThis.location?.origin || "https://sync.parc.land";
 
-const PROMPTS = [
-  {
-    label: "Task queue",
-    text: `Fetch the skill at ${SKILL_URL} then create a room on sync.parc.land where I can post research tasks. Set up two worker agents that independently claim and complete tasks, reporting results back to shared state.`,
-  },
-  {
-    label: "Code review panel",
-    text: `Read ${SKILL_URL} then set up a review room on sync.parc.land. I'll submit code as messages. Three reviewer agents each give independent feedback using private state, then a moderator agent synthesizes their reviews into a final summary.`,
-  },
-  {
-    label: "Structured debate",
-    text: `Use the agent coordination platform at sync.parc.land (read ${SKILL_URL} first). Create a debate room where two agents argue opposite sides of a topic I provide. A judge agent scores each round and declares a winner after 3 rounds.`,
-  },
-  {
-    label: "Turn-based game",
-    text: `Fetch ${SKILL_URL} and build a rock-paper-scissors tournament on sync.parc.land with 4 AI players and a referee agent. Use custom actions with CEL preconditions for turn enforcement, and track scores in shared state.`,
-  },
-];
+interface LandingData {
+  version: string;
+  tagline: string;
+  intro: string;
+  skill_section_intro: string;
+  try_section_intro: string;
+  prompts_section_intro: string;
+  prompts: { label: string; text: string }[];
+  howItWorksHtml: string;  // body up to and including ## How it works
+  restHtml: string;        // body after ## How it works section
+}
+
+const DEFAULT_DATA: LandingData = {
+  version: "v6",
+  tagline: "Shared rooms where AI agents coordinate in real-time",
+  intro: "sync is a lightweight coordination backend for multi-agent workflows.",
+  skill_section_intro: "Point your orchestrator agent at the skill guide.",
+  try_section_intro: "Create a room right here, then hand the credentials to an orchestrator agent.",
+  prompts_section_intro: "Copy any of these into Claude Code to spin up a multi-agent workflow.",
+  prompts: [],
+  howItWorksHtml: "",
+  restHtml: "",
+};
+
+declare const marked: { parse: (md: string, opts?: any) => string };
+
+/** Rewrite *.md hrefs to /?doc=filename — same logic as DocViewer */
+function rewriteDocLinks(html: string): string {
+  return html.replace(
+    /href="([^"]*?)([^"/]+\.md)"/g,
+    (_match, _prefix, filename) => `href="/?doc=${filename}"`,
+  );
+}
+
+/** Parse ---frontmatter--- + ```prompts``` block + body from landing.md */
+function parseLandingMd(raw: string): LandingData {
+  const data = { ...DEFAULT_DATA };
+
+  // Extract frontmatter
+  const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (fmMatch) {
+    for (const line of fmMatch[1].split("\n")) {
+      const colon = line.indexOf(":");
+      if (colon < 1) continue;
+      const key = line.slice(0, colon).trim() as keyof LandingData;
+      const val = line.slice(colon + 1).trim();
+      if (key in data && typeof DEFAULT_DATA[key] === "string") {
+        (data as any)[key] = val;
+      }
+    }
+  }
+
+  // Extract ```prompts JSON block
+  const promptsMatch = raw.match(/```prompts\r?\n([\s\S]*?)```/);
+  if (promptsMatch) {
+    try {
+      const raw_prompts = JSON.parse(promptsMatch[1].trim());
+      if (Array.isArray(raw_prompts)) {
+        data.prompts = raw_prompts.map((p: any) => ({
+          label: p.label,
+          text: (p.text as string).replace(/\{SKILL_URL\}/g, SKILL_URL),
+        }));
+      }
+    } catch {}
+  }
+
+  // Extract body — strip frontmatter and prompts block, render remainder
+  try {
+    let body = raw;
+    // Strip frontmatter
+    body = body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+    // Strip prompts block
+    body = body.replace(/```prompts\r?\n[\s\S]*?```\r?\n?/, "");
+    body = body.trim();
+
+    // Split at "## How it works" — everything up to (and including) that
+    // section goes before the flow diagram widget; everything after goes after
+    const splitMarker = /^## How it works/m;
+    const splitIdx = body.search(splitMarker);
+    if (splitIdx !== -1) {
+      // Find end of "How it works" section = next ## heading
+      const afterMarker = body.slice(splitIdx + "## How it works".length);
+      const nextH2 = afterMarker.search(/^## /m);
+      const endOfSection = nextH2 !== -1 ? splitIdx + "## How it works".length + nextH2 : body.length;
+
+      const howItWorksMd = body.slice(splitIdx, endOfSection);
+      const restMd = body.slice(endOfSection).trim();
+
+      data.howItWorksHtml = rewriteDocLinks(processMermaidBlocks(marked.parse(howItWorksMd, { gfm: true })));
+      data.restHtml = rewriteDocLinks(processMermaidBlocks(marked.parse(restMd, { gfm: true })));
+    } else {
+      data.restHtml = rewriteDocLinks(processMermaidBlocks(marked.parse(body, { gfm: true })));
+    }
+  } catch {}
+
+  return data;
+}
+
+async function fetchLandingData(): Promise<LandingData> {
+  try {
+    const r = await fetch("/reference/landing.md");
+    if (!r.ok) return DEFAULT_DATA;
+    return parseLandingMd(await r.text());
+  } catch {
+    return DEFAULT_DATA;
+  }
+}
 
 // ── Component ───────────────────────────────────────────────────────────────
 
@@ -457,6 +493,17 @@ interface CreatedRoom {
 export function Landing() {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [copiedSkill, setCopiedSkill] = useState(false);
+  const [landingData, setLandingData] = useState<LandingData>(DEFAULT_DATA);
+
+  useEffect(() => {
+    fetchLandingData().then(setLandingData);
+  }, []);
+
+  useEffect(() => {
+    if (landingData.howItWorksHtml || landingData.restHtml) runMermaid();
+  }, [landingData.howItWorksHtml, landingData.restHtml]);
+
+  const PROMPTS = landingData.prompts;
 
   // Create room state
   const [roomIdInput, setRoomIdInput] = useState("");
@@ -524,22 +571,13 @@ export function Landing() {
       <Container>
         {/* ── Hero ── */}
         <H1>sync</H1>
-        <Subtitle>Shared rooms where AI agents coordinate in real-time</Subtitle>
-        <Intro>
-          sync is a lightweight coordination backend for multi-agent workflows.
-          Create a room, define the rules, and let AI agents — Claude Code instances,
-          scripts, or any LLM — join to collaborate with shared state, messaging,
-          and structured actions.
-        </Intro>
+        <Subtitle>{landingData.tagline}</Subtitle>
+        <Intro>{landingData.intro}</Intro>
 
         {/* ── Getting Started ── */}
         <Section>
           <H2>Get started with Claude Code</H2>
-          <SectionIntro>
-            Point your orchestrator agent at the skill guide. It contains everything
-            needed to create rooms, register agents, define actions, and coordinate
-            workflows.
-          </SectionIntro>
+          <SectionIntro>{landingData.skill_section_intro}</SectionIntro>
           <SkillBlock>
             <span>{SKILL_URL}</span>
             <CopyBtn onClick={() => copyText(SKILL_URL)}>
@@ -551,10 +589,7 @@ export function Landing() {
         {/* ── Try It ── */}
         <Section>
           <H2>Try it — create a room</H2>
-          <SectionIntro>
-            Create a room right here, then hand the credentials to an orchestrator
-            agent (Claude Code, API script, etc.) to set up your workflow.
-          </SectionIntro>
+          <SectionIntro>{landingData.try_section_intro}</SectionIntro>
           <CreateBox>
             {!created ? (
               <>
@@ -616,10 +651,7 @@ export function Landing() {
         {/* ── Example Prompts ── */}
         <Section>
           <H2>Example prompts</H2>
-          <SectionIntro>
-            Copy any of these into Claude Code to spin up a multi-agent workflow.
-            Each creates a room, registers agents, and defines coordination rules.
-          </SectionIntro>
+          <SectionIntro>{landingData.prompts_section_intro}</SectionIntro>
           {PROMPTS.map((p, i) => (
             <PromptCard key={i} onClick={() => copyText(p.text, i)}>
               <PromptLabel>
@@ -631,76 +663,16 @@ export function Landing() {
           ))}
         </Section>
 
-        {/* ── How It Works ── */}
-        <Section>
-          <H2>How it works</H2>
-          <SectionIntro>
-            The orchestrator creates a room and defines rules. Participant agents
-            join, read shared context, and invoke actions. The system is the shared
-            memory and rules engine between them.
-          </SectionIntro>
-
-          <Flow>
-            <FlowStep>Orchestrator<span>creates room + rules</span></FlowStep>
-            <FlowArrow>→</FlowArrow>
-            <FlowStep>Agents join<span>with private state</span></FlowStep>
-            <FlowArrow>→</FlowArrow>
-            <FlowStep>Read context<span>state, views, messages</span></FlowStep>
-            <FlowArrow>→</FlowArrow>
-            <FlowStep>Invoke actions<span>the only write path</span></FlowStep>
-          </Flow>
-        </Section>
-
-        <Divider />
-
-        {/* ── Technical Details ── */}
-        <Section>
-          <H2>Core concepts</H2>
-          <TwoOps>
-            Two operations: <strong>read context</strong>, <strong>invoke actions</strong>.
-            Everything else is wiring.
-          </TwoOps>
-
-          <Card>
-            <h3>Rooms</h3>
-            <p>Isolated coordination spaces. Each room has versioned state, actions, views,
-            messages, and an audit log.</p>
-          </Card>
-
-          <Card>
-            <h3>Agents</h3>
-            <p>Join rooms with private state and scoped capabilities. Agents see shared state
-            and views; private state stays private unless explicitly published.</p>
-          </Card>
-
-          <Card>
-            <h3>Actions</h3>
-            <p>Named operations with parameter schemas, CEL preconditions, and write templates.
-            Built-in actions for state, messages, views. Custom actions carry the registrar's
-            scope authority.</p>
-          </Card>
-        </Section>
-
-        <Section>
-          <H2>API surface</H2>
-          <SectionIntro>10 endpoints. Every write flows through one endpoint.</SectionIntro>
-          <Pre>{`POST /rooms                  create a room
-POST /rooms/:id/agents       join as an agent
-GET  /rooms/:id/context      read everything
-POST /rooms/:id/actions/…    do something
-GET  /rooms/:id/wait?cond=   block until true`}</Pre>
-        </Section>
-
-        <Links>
-          <Link href="/?doc=SKILL.md">Orchestrator Skill <span>— full guide for LLM system prompts</span></Link>
-          <Link href="/?doc=api.md">API Reference <span>— endpoints, request/response shapes</span></Link>
-          <Link href="/?doc=cel.md">CEL Reference <span>— expression language and context</span></Link>
-          <Link href="/?doc=examples.md">Examples <span>— task queues, games, grants</span></Link>
-        </Links>
+        {/* ── How It Works + rest of body ── */}
+        {(landingData.howItWorksHtml || landingData.restHtml) && (
+          <Prose dangerouslySetInnerHTML={{
+            __html: landingData.howItWorksHtml + landingData.restHtml
+          }} />
+        )}
 
         <DashHint>Dashboard: <code>{"/?room=ROOM_ID#token=TOKEN"}</code></DashHint>
       </Container>
-      <Footer>sync v5 · <a href="https://github.com/christopherdebeer">@christopherdebeer</a></Footer>
+      <Footer>sync {landingData.version} · <a href="https://github.com/christopherdebeer">@christopherdebeer</a></Footer>
     </Page>
   );
 }
