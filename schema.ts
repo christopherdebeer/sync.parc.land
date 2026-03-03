@@ -1,0 +1,167 @@
+import { sqlite } from "https://esm.town/v/std/sqlite";
+
+/**
+ * v5 unified schema.
+ *
+ * Core tables: rooms, agents, state, actions, views.
+ * State is the substrate — messages, agent presence, shared state are all scopes in one table.
+ * Actions are write capabilities. Views are read capabilities.
+ * Auth: room tokens for admin, agent tokens for identity, scope grants for privileges.
+ */
+
+export async function migrate() {
+  await sqlite.batch([
+    // ============ Rooms ============
+    {
+      sql: `CREATE TABLE IF NOT EXISTS rooms (
+        id TEXT PRIMARY KEY,
+        created_at TEXT DEFAULT (datetime('now')),
+        meta TEXT DEFAULT '{}',
+        token_hash TEXT,
+        view_token_hash TEXT
+      )`,
+      args: [],
+    },
+
+    // ============ Agents ============
+    {
+      sql: `CREATE TABLE IF NOT EXISTS agents (
+        id TEXT NOT NULL,
+        room_id TEXT NOT NULL REFERENCES rooms(id),
+        name TEXT NOT NULL,
+        role TEXT DEFAULT 'agent',
+        joined_at TEXT DEFAULT (datetime('now')),
+        meta TEXT DEFAULT '{}',
+        last_heartbeat TEXT,
+        status TEXT DEFAULT 'active',
+        waiting_on TEXT,
+        token_hash TEXT,
+        grants TEXT DEFAULT '[]',
+        last_seen_seq INTEGER DEFAULT 0,
+        enabled_expr TEXT,
+        PRIMARY KEY (id, room_id)
+      )`,
+      args: [],
+    },
+
+    // ============ Unified State ============
+    {
+      sql: `CREATE TABLE IF NOT EXISTS state (
+        room_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        key TEXT NOT NULL,
+        sort_key INTEGER,
+        value TEXT NOT NULL,
+        version INTEGER DEFAULT 1,
+        updated_at TEXT DEFAULT (datetime('now')),
+        timer_json TEXT,
+        timer_expires_at TEXT,
+        timer_ticks_left INTEGER,
+        timer_tick_on TEXT,
+        timer_effect TEXT,
+        timer_started_at TEXT,
+        enabled_expr TEXT,
+        PRIMARY KEY (room_id, scope, key)
+      )`,
+      args: [],
+    },
+
+    // ============ Actions ============
+    {
+      sql: `CREATE TABLE IF NOT EXISTS actions (
+        id TEXT NOT NULL,
+        room_id TEXT NOT NULL REFERENCES rooms(id),
+        scope TEXT DEFAULT '_shared',
+        description TEXT,
+        if_expr TEXT,
+        enabled_expr TEXT,
+        result_expr TEXT,
+        writes_json TEXT NOT NULL DEFAULT '[]',
+        params_json TEXT,
+        timer_json TEXT,
+        timer_expires_at TEXT,
+        timer_ticks_left INTEGER,
+        timer_tick_on TEXT,
+        timer_effect TEXT,
+        timer_started_at TEXT,
+        on_invoke_timer_json TEXT,
+        registered_by TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        version INTEGER DEFAULT 1,
+        PRIMARY KEY (id, room_id)
+      )`,
+      args: [],
+    },
+
+    // ============ Views ============
+    {
+      sql: `CREATE TABLE IF NOT EXISTS views (
+        id TEXT NOT NULL,
+        room_id TEXT NOT NULL REFERENCES rooms(id),
+        scope TEXT DEFAULT '_shared',
+        description TEXT,
+        expr TEXT NOT NULL,
+        enabled_expr TEXT,
+        timer_json TEXT,
+        timer_expires_at TEXT,
+        timer_ticks_left INTEGER,
+        timer_tick_on TEXT,
+        timer_effect TEXT,
+        timer_started_at TEXT,
+        registered_by TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        version INTEGER DEFAULT 1,
+        PRIMARY KEY (id, room_id)
+      )`,
+      args: [],
+    },
+  ]);
+
+  // ============ Indexes ============
+  const indexes = [
+    `CREATE INDEX IF NOT EXISTS idx_state_scope_sort ON state(room_id, scope, sort_key) WHERE sort_key IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_state_scope ON state(room_id, scope)`,
+    `CREATE INDEX IF NOT EXISTS idx_state_tick_on ON state(room_id, timer_tick_on) WHERE timer_tick_on IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_actions_room ON actions(room_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_actions_tick_on ON actions(room_id, timer_tick_on) WHERE timer_tick_on IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_views_room ON views(room_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_agents_room ON agents(room_id)`,
+  ];
+  for (const sql of indexes) {
+    try { await sqlite.execute({ sql, args: [] }); } catch (_) {}
+  }
+
+  // ============ v4→v5 migration helpers ============
+  // Add new columns to existing tables if upgrading from v4
+  const addColumn = async (table: string, col: string, typedef: string) => {
+    try {
+      await sqlite.execute({ sql: `ALTER TABLE ${table} ADD COLUMN ${col} ${typedef}`, args: [] });
+    } catch (_) { /* already exists */ }
+  };
+
+  // Rooms: add token_hash and view_token_hash if missing
+  await addColumn("rooms", "token_hash", "TEXT");
+  await addColumn("rooms", "view_token_hash", "TEXT");
+
+  // Agents: add grants and last_seen_seq if missing
+  await addColumn("agents", "grants", "TEXT DEFAULT '[]'");
+  await addColumn("agents", "last_seen_seq", "INTEGER DEFAULT 0");
+  await addColumn("agents", "enabled_expr", "TEXT");
+
+  // State: add sort_key if missing
+  await addColumn("state", "sort_key", "INTEGER");
+  await addColumn("state", "timer_json", "TEXT");
+  await addColumn("state", "timer_expires_at", "TEXT");
+  await addColumn("state", "timer_ticks_left", "INTEGER");
+  await addColumn("state", "timer_tick_on", "TEXT");
+  await addColumn("state", "timer_effect", "TEXT");
+  await addColumn("state", "timer_started_at", "TEXT");
+  await addColumn("state", "enabled_expr", "TEXT");
+
+  // Actions: add description, scope if missing
+  await addColumn("actions", "scope", "TEXT DEFAULT '_shared'");
+  await addColumn("actions", "description", "TEXT");
+  await addColumn("actions", "result_expr", "TEXT");
+
+  // Views table is new — created above. No migration needed.
+}

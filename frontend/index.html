@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sync — Multi-Agent Coordination for AI Workflows</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<style>
+  :root {
+    /* Dashboard (always dark) */
+    --bg: #0d1117; --fg: #c9d1d9; --dim: #484f58; --border: #21262d;
+    --accent: #58a6ff; --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --surface: #161b22; --surface2: #1c2129; --purple: #bc8cff; --orange: #f0883e;
+    /* Landing / Docs — light default */
+    --lbg: #ffffff; --lfg: #1a1a1a; --ldim: #6b7280;
+    --laccent: #2563eb; --lborder: #e5e7eb; --lsurface: #f4f4f5;
+    --laccent-soft: #dbeafe;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --lbg: #0a0a0c; --lfg: #e4e4e7; --ldim: #71717a;
+      --laccent: #60a5fa; --lborder: #27272a; --lsurface: #18181b;
+      --laccent-soft: #1e3a5f;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  code {
+    background: var(--lsurface);
+    border: 1px solid var(--lborder);
+    color: var(--laccent);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/frontend/index.tsx"></script>
+</body>
+</html>
