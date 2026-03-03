@@ -3,7 +3,7 @@
 **Room:** adversary-hunt-02
 **Platform:** sync.parc.land (v6)
 **Date:** 2026-03-03
-**Dashboard:** https://sync.parc.land/rooms/adversary-hunt-02/dashboard?token=view_cef4ff01f6f0401d5de67e44872f280fb61d97ff154c0686
+**Dashboard:** https://sync.parc.land/?room=adversary-hunt-02#token=view_cef4ff01f6f0401d5de67e44872f280fb61d97ff154c0686
 
 ## Design Changes from Experiment 1
 
