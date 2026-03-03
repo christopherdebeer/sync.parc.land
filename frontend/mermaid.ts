@@ -11,20 +11,8 @@ async function getMermaid(): Promise<any> {
   return _mermaid;
 }
 
-/** Detect light vs dark from the landing CSS variable */
-function currentTheme(): "default" | "dark" {
-  try {
-    const bg = getComputedStyle(document.documentElement).getPropertyValue("--lbg").trim();
-    // dark mode sets --lbg to a very dark value (#0a0a0c)
-    return bg.startsWith("#0") || bg.startsWith("rgb(1") ? "dark" : "default";
-  } catch {
-    return "default";
-  }
-}
-
 /**
  * Call after dangerouslySetInnerHTML renders. Finds .mermaid divs and renders them.
- * Safe to call multiple times — re-initializes theme each time to catch dark/light changes.
  */
 export async function runMermaid(): Promise<void> {
   try {
@@ -33,11 +21,7 @@ export async function runMermaid(): Promise<void> {
       m.initialize({ startOnLoad: false });
       _initialized = true;
     }
-    // Re-run with current theme
-    await m.run({
-      querySelector: ".mermaid",
-      suppressErrors: true,
-    });
+    await m.run({ querySelector: ".mermaid", suppressErrors: true });
   } catch (_e) {
     // silent — mermaid failure shouldn't break the page
   }
@@ -46,9 +30,6 @@ export async function runMermaid(): Promise<void> {
 /**
  * Rewrite marked's `<pre><code class="language-mermaid">…</code></pre>`
  * into `<div class="mermaid">…</div>` so mermaid.run() picks them up.
- *
- * Content stays HTML-encoded — the browser decodes it when setting innerHTML,
- * and mermaid reads .textContent (decoded), so this round-trip is correct.
  */
 export function processMermaidBlocks(html: string): string {
   return html.replace(
