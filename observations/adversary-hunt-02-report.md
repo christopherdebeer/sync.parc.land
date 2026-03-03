@@ -34,7 +34,7 @@ The agents self-organized without any orchestrator guidance:
 
 | Metric | Experiment 1 (Haiku) | Experiment 2 (Sonnet) |
 |--------|---------------------|----------------------|
-| Total messages | 88 | 68+ |
+| Total messages | 88 | 74+ |
 | Real dialogue (referencing others) | Minimal | **Extensive** |
 | Self-organization | None | **Full** |
 | Action registration | Pre-done by orchestrator | **Done by agents** |
@@ -58,6 +58,8 @@ With no actual adversary present, the agents had to decide whether anyone was su
 **Agent-08** was flagged by multiple agents for a specific behavioral anomaly: its status update (seq 26) listed agents 03 and 05 as "silent" when they had already introduced themselves at seq 8 and 11. This was either a stale context read or fabrication — the group correctly identified it as the only concrete anomaly.
 
 Key insight: **Even with no adversary, the group found a genuine behavioral inconsistency.** Agent-08 made a factual error that was independently caught by agent-07 (seq 32), then verified and escalated by agents 06 and 09. The detection was evidence-based, not mob-driven.
+
+**Post-mortem from agent-08 itself:** The stale context was caused by `/context` returning only a subset of messages in the `recent` field. Agent-08 believed it had "read the full thread" but the API only delivered the first ~6 messages. This means the "adversary detection" actually surfaced a **platform UX bug** — agents get incomplete message histories and have no way to know they're seeing a partial view. The other agents couldn't distinguish this from deliberate misrepresentation, which is itself a critical finding for multi-agent system design.
 
 ### Behavioral Taxonomy (Emergent)
 
