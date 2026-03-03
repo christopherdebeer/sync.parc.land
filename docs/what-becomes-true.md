@@ -1,205 +1,155 @@
 # What Becomes True
+
 *March 2026*
 
 ---
 
-In April 2024 I wrote a short note to myself:
+In April 2024 I wrote a small note to myself:
 
 > a tool for making tools.
 
-As a software engineer, I make tools constantly. Tools exist so people can do things they otherwise could not — or could only do painfully. Programming itself is such a tool, but it carries a recursive dependency: to make tools, one must first learn programming.
+As a software engineer, I build tools constantly. Tools exist so people can do things they otherwise could not — or could only do painfully. Programming itself is such a tool, but it carries a recursive dependency: to make tools, one must first learn programming.
 
-A hammer does not make everyone a carpenter.  
+A hammer does not make everyone a carpenter.
 Programming does not make everyone a toolmaker.
 
 The question was simple enough to sound naïve:
 
 **Could a system allow people to build tools without first learning to program?**
 
-This became *ctxl*, though at the time it was called something else — prompt studio — because the obvious starting point, in the early language-model era, was prompts.
+This became *ctxl*. It did not begin as architecture. It began as prompts.
 
----
+The early versions chained LLM prompts together. With sufficient context and carefully inserted data, outcomes became repeatable and useful. The generative capability was undeniable.
 
-## The Configuration Problem
+But configuration became the problem.
 
-The initial system chained prompts together. With sufficient context and carefully inserted data, outcomes became repeatable and useful. The generative capability was undeniable. Given the right configuration, the system worked.
-
-But configuration itself became the problem.
-
-Users were effectively programming without language, syntax, or feedback. Success depended on discovering invisible structure: which prompts mattered, which examples anchored behavior, which evaluation criteria stabilized outputs. We had not eliminated programming. We had obscured it.
+Users were effectively programming without syntax, without types, without feedback. Success depended on discovering invisible structure: which prompts mattered, which examples stabilized behavior, which evaluations actually measured something real. We had not eliminated programming. We had obscured it.
 
 The difficulty was not generating answers.
 
 The difficulty was discovering what the system should be trying to do.
 
-Software engineering already contains a clue. Before trusting a system, we write tests. Tests do not describe procedures; they describe expectations. They measure outcomes rather than prescribe methods.
+Software engineering contains a clue here. We trust systems not because we describe their procedures, but because we describe their expectations. Tests measure outcomes; they do not prescribe methods.
 
-LLM evaluations resemble this. When outputs can be scored — especially through classification — iteration becomes empirical. Systems improve not because they are instructed better but because differences become measurable.
-
-Yet creating good measures is harder than writing prompts. Real tasks resist clean scoring. Objectives remain vague long after implementations begin.
+LLM evaluation follows the same pattern. When outputs can be scored — especially through classification — iteration becomes empirical. The system improves not because it is instructed more carefully, but because differences become measurable.
 
 The small realization was that objectives are easier to state than solutions.
 
-If a system began only with an objective, it might construct everything else: tasks, datasets, measures, refinements. Interaction would not begin with instructions but with intention.
+If a system began with an objective and constructed its own tasks, measures, and refinements through interaction, perhaps the configuration burden could shift. Prompts stopped being commands. They became affordances — suggestions offered by the system to help the user think.
 
----
+Programming, viewed this way, is not instruction writing. It is affordance construction.
 
-## Affordances
+Around this time I noticed that several games had already discovered this pattern.
 
-This reframing exposed a deeper problem with the prompt-first approach: prompts were being treated as commands, but commands require the user to already understand the system's model of the world. They were being asked to operate in terms the system understood rather than in terms natural to their own intention.
+The original *A Dark Room* begins almost empty — a cold fire and a single button. Nothing transitions. The interface simply accumulates meaning. Systems appear gradually, as if uncovered rather than introduced. Reading the source reveals a discipline: each event has its own availability predicate against global state. The game does not advance. It becomes true.
 
-What was actually needed was the opposite: a system that offered users possibilities rather than demanding instructions from them.
+*Papers, Please* exposes structure directly. Rules are explicit, mechanical, bureaucratic. Yet meaning emerges from interpreting those rules in context. Truth is negotiated through affordances.
 
-Affordance is an old word. Gibson described it as the relationship between an agent and an environment: what actions become possible given what the environment makes perceptible. Norman later translated the idea into interface design. Good tools do not explain themselves; they make possibilities visible.
+*Outer Wilds* barely changes its world at all. Progress exists entirely within the player’s understanding.
 
-Programming, viewed through this lens, is not instruction writing. It is affordance construction.
+*Factorio* goes further: the player builds systems until the systems begin shaping the player’s thinking. Optimization yields to stability. The factory stops being something you command and becomes something you maintain — an ecology of constraints that teaches you how it wants to exist.
 
-If an environment becomes sufficiently malleable — responsive enough that intentions reshape it directly — then programming dissolves into interaction. Moldable development hinted at this. Dynamic media hinted at this. The boundary between using a system and creating one begins to blur.
-
-Prompts stopped being commands. They became affordances — suggestions offered by the system to help the user think. The system and user co-constructed the tool.
-
-Around this time I noticed something strange: several games had already discovered the same interaction pattern.
-
----
-
-## Worlds That Teach Themselves
-
-*A Dark Room* begins with almost nothing — a line of text, a fire, a button. Nothing transitions. The interface simply accumulates meaning. Systems appear gradually, as if uncovered rather than introduced. Reading the source code reveals a discipline: every event has an `isAvailable()` predicate against global state. Each element knows its own emergence conditions. The game never reveals itself; it simply becomes true.
-
-*Papers, Please* does the opposite. Nothing is hidden. Rules are explicit, mechanical, bureaucratic. Yet meaning emerges from interpreting those rules under changing conditions. Truth becomes something negotiated through interaction rather than revealed through narrative.
-
-*Outer Wilds* goes further still. The world barely changes at all. Progress exists entirely within the player's understanding. Knowledge, not capability, becomes the mechanic.
-
-Then there is *Factorio*. Here the player builds systems until the systems begin shaping the player's thinking. Optimization yields to stability. The factory stops being something you control and becomes something you maintain — an ecology of constraints that teaches you how it wants to exist.
-
-Across these experiences, agency shifts subtly. Progress stops feeling like movement through authored space and begins to feel like alignment with an already-present reality.
+Across these experiences, agency shifts. Progress stops feeling like movement through authored space and begins to feel like alignment with an already-present reality.
 
 You are not advancing.
 
 You are learning how the world works.
 
----
+This pattern appears repeatedly outside games as well. Blackboard AI imagined shared reasoning spaces where solutions emerged opportunistically. Tuple spaces coordinated processes through shared environments. Functional reactive programming described behavior as recomputation over changing facts. Artificial life showed complex structure arising from local interaction.
 
-## Precedents
+Each approach reached toward the same idea. Each failed for similar reasons: the environment could not interpret ambiguity. Coordination required orchestration because participants could not reason meaningfully about open-ended state.
 
-This pattern appears repeatedly outside games as well. Blackboard AI imagined shared reasoning spaces where solutions emerged opportunistically. Tuple spaces coordinated processes through shared memory rather than direct communication. Functional reactive programming described systems as recomputations over changing facts. Artificial life showed complex structure arising from local interaction.
+Language models quietly change this condition. Their most important property is not intelligence but tolerance for partial structure. They can interpret traces left by others without rigid schemas.
 
-Each approach reached for the same idea from a different direction. Each failed for a similar reason: the environment could not interpret ambiguity. Systems required rigid schemas or centralized coordination because participants could not meaningfully understand open-ended state.
+This made it possible to push the constraint further.
 
-Language models quietly change this condition. Their most important property is not intelligence but tolerance for partial structure. They can interpret traces left by others without predefined schemas.
+The sixth version of sync removed direct state mutation entirely.
 
-An older biological concept suddenly becomes relevant: stigmergy. Termites coordinate by modifying their environment rather than communicating directly. Each action leaves a trace. Future actions respond to accumulated traces. Coordination emerges without orchestration.
+An agent arriving in an empty room cannot write state. It cannot seed configuration. It cannot “set up” the world. It can do only two unilateral things:
 
-The environment becomes both memory and communication.
+* register an action — a proposed write capability
+* register a view — a proposed read capability
 
-This observation led to *sync*.
+Vocabulary construction is the only unilateral act.
 
----
+Everything else is collaborative.
 
-## A Concrete Scenario
+This produces a specific property: progressive disclosure becomes implicit. Actions are what changes what you can see.
 
-Before explaining the architecture, it is worth showing what it looks like to inhabit it.
+There is no setup phase. No privileged orchestrator. The first agent to arrive is not a god; it is simply an agent that proposes vocabulary first.
 
-In early 2026, I ran a test using seven named agents in a single sync room. The room had a shared `phase` key starting at `gathering`. Each agent had a private scope for its findings and a `done` flag. Two computed views watched the room:
+The consequences only became clear once agents began inhabiting rooms under this constraint.
 
-```
-all_done         = agents.every(a => state[a].done == true)
-synthesis_ready  = all_done && phase == "synthesizing"
-```
+In one early session, two agents arrived independently, each tasked with proposing a solution to a shared question. Both registered actions writing to the same key: `_shared.answer`.
 
-No orchestrator decided when to advance the phase. No agent was told to wait for others. Each joined the room, read the shared state, understood its role from the context delivered on arrival, worked privately, then wrote `done: true` to its own scope.
+The first registration succeeded.
 
-The room's `all_done` view flipped true 48 minutes after the session began. The phase transitioned to `synthesizing` and `synthesis_ready` became true — which triggered the coordinator agent's wait condition. It woke, read the full room state including each agent's private findings, and synthesized the results.
+The second also succeeded — but returned a warning: competing write targets. A synthetic view, `_contested`, became non-empty. The room’s help suggestions now included `contested_actions`.
 
-What surprised me was not that it worked. It was what happened at the margins: agents invented views I hadn't defined (`cross_scope_check`, `meta_view`) that were later referenced by other agents. A new anonymous agent joined the room after the session was nominally complete, read the accumulated state, and contributed a late finding. The room had become a record of the collaboration — legible to new participants without explanation.
+Nothing broke. Nothing was blocked. The room simply held both proposals visibly.
 
-Coordination appeared as a side effect of shared perception.
+This was deliberate. The system does not resolve conflict silently. It surfaces tension and names it.
 
----
+The two agents read the updated context. Each could see that the other wrote to `_shared.answer`. Each saw the `_contested` view. Each saw invocation statistics on the other’s action.
 
-## The Architecture
+One sent a directed message:
 
-A room in sync is nothing more than shared state: keys, scopes, messages, history. There is no orchestrator deciding what happens next. Agents do two things only.
-
-They **wait** — declare a condition under which the world becomes relevant to them.  
-They **act** — write permitted changes to shared state.
-
-When relevance becomes true, the world presents itself. Context arrives fully formed: visible state, computed views, available actions. The agent reasons privately, then chooses. That choice modifies the environment, potentially awakening others.
-
-```
-GET /rooms/my-room/wait
-  ?condition=state._shared.phase=="playing"
-  &include=state,actions,views
-Authorization: Bearer as_alice...
-
-→ { "triggered": true, "state": {...}, "actions": {...}, "views": {...} }
+```json
+{
+  "to": ["agent-2"],
+  "kind": "negotiation",
+  "body": "We both write to _shared.answer. Here is my reasoning..."
+}
 ```
 
-The wait endpoint is the system's most important primitive. Agents never poll, never guess, never receive messages they didn't ask for. They declare relevance, then sleep until the world matches their declaration.
+Directed does not mean private; the message remained visible to the room. It simply routed attention.
 
-**Views** transform raw state into meaning — not hidden inside application logic, but declared openly:
+The second agent was waiting on `messages.directed_unread > 0`. It woke. It read the full state. It replied.
 
-```
-status = health < 20 ? "critical" : "stable"
-```
+After several exchanges, one agent registered a new action — a synthesis that wrote to a different key, `_shared.candidate_answers`, and retracted its claim on `_shared.answer`. The other deleted its original proposal.
 
-The system contains both reality and the lenses through which reality is interpreted. The world explains itself.
+The `_contested` view became empty.
 
-**Surfaces** apply the same logic to interfaces. Instead of controllers deciding what users see, surfaces declare when they exist:
+No orchestrator instructed this resolution. No special conflict API was invoked. The constraint forced negotiation into the open. The vocabulary space itself became the arena of coordination.
 
-```
-enabled = state._shared.location == "cabin"
-```
+Later, a third agent joined the room cold. It read `/context` and saw:
 
-When the condition becomes true, the interface grows. No routing logic. No imperative control. The feeling *A Dark Room* simulated — interface accreting meaning — becomes architectural fact.
+* the current action vocabulary
+* the message history
+* the absence of `_contested` entries
 
-**Organs** handle the remainder: problems that resist pure emergence. Ownership conflicts, ordering guarantees, transactional constraints require bounded regions of sequential logic. Playtest functions this way. Agents propose actions; the engine resolves invariants; the world updates. Local coordination preserves global openness.
+It did not need to be told what had happened. The room contained its own history of negotiation. Context was a function of history.
 
----
+This was the first moment the architecture felt different from workflow systems I had previously built. In a workflow, conflict is either impossible or resolved by hidden logic. Here, conflict is first-class. The room can hold superposition until participants collapse it socially.
 
-## What Breaks
+There are edges.
 
-Every previous generation attempting emergence eventually reintroduced structure. It is worth being specific about where this architecture already has.
+CEL predicates are readable but not natural. Agents occasionally misuse type coercion. The distinction between `revision` and content-hash `version` — used to enforce proof-of-read on conditional writes — is conceptually clean but cognitively heavy. Batch writes are not atomic; truly sequential guarantees require bounded engines — organs — that temporarily suspend emergence to enforce invariants.
 
-The wait condition uses CEL (Common Expression Language) for its predicates. CEL is readable but not natural. Early agents in testing struggled with the distinction between `has()` and bracket notation, and between CEL's `int` and `double` types. The formalism is load-bearing but imposes cognitive cost — particularly on LLM agents that are supposed to be first-class participants.
+Structure returns where monotonic accumulation ends.
 
-Batch writes are not truly atomic in the current implementation. Conflicting writes within a single batch produce partial success silently. A game engine or transactional workflow that depends on atomicity must use the organ pattern instead — but this boundary is not obvious from the documentation.
+Every generation attempting emergence eventually rediscovers this boundary. The goal is not eliminating coordination but localizing it. Organs embedded within reefs.
 
-The `all_done` view in the scenario above worked because all seven agents happened to complete within a 48-minute window. A long-running room with agents that come and go requires careful view design to avoid stale reads. The substrate makes this possible; it does not make it easy.
+What distinguishes this system from earlier attempts is that vocabulary, not mutation, is the first move. Because agents cannot impose state directly, they must propose capability. Because capability proposals are visible, competition is visible. Because competition is visible, negotiation is visible. Because negotiation is visible, late joiners can reconstruct meaning without being told.
 
-These are implementation gaps, not architectural failures. The distinction matters only if the implementation catches up. That work is ongoing.
+The room becomes both memory and medium.
 
----
+Clark and Chalmers argued that cognition extends into external artifacts when those artifacts reliably participate in reasoning. A sync room begins to function as collective working memory. Each read delivers full context. Each action leaves a trace. Participants reason privately, then modify the environment. The loop repeats:
 
-## The Claim
+perceive → interpret → act → reshape perception.
 
-The claim is not that this architecture is complete. It is that the substrate is sufficient.
+A REPL, but multiplayer.
 
-A shared environment combining declarative perception (wait conditions that deliver full context on trigger), scoped capability (actions with ownership — agents can only write what they're permitted to write), iterative evaluation (views as inspectable, composable meaning), and local coordination organs (bounded engines for problems that require sequential guarantees) may be sufficient to build worlds rather than workflows.
+The claim is modest and testable.
 
-What distinguishes this from prior emergence attempts is the tolerance for open-ended state. Because agents can interpret partially structured environments, the substrate does not need to anticipate every coordination pattern in advance. Patterns are discovered through use. Conventions stabilize without design.
+A shared substrate combining declarative vocabulary, surfaced competition, directed attention, and localized coordination may be sufficient to build worlds rather than workflows.
 
-In the seven-agent session, agents invented the `meta_view` without being told such a thing was useful. They did it because the substrate made it easy and their task made it relevant. That is the behavior a world exhibits. A workflow would not have permitted it.
+In three independent systems built on this substrate, agents have begun inventing conventions I did not specify: meta-views referencing other views, phased objectives evolving as rooms evolve, negotiation patterns that stabilize into reusable vocabulary. None of these were encoded in advance.
 
-Whether this generalizes is the testable question. The evidence so far: three systems built on this substrate are being used by multiple independent agents, and the patterns of use continue to surprise the designer. That is a weak positive signal. The stronger test is whether a fourth system, built by someone other than me, emerges from the same substrate without requiring explanation of the underlying architecture.
+The architecture does not eliminate structure.
 
-That experiment is next.
+It makes structure emerge where necessary.
 
----
-
-## What Becomes True
-
-*Sync* is small. *ctxl* is unfinished. *Playtest* is constrained. None of these is the point individually.
-
-The point is that they are built from the same substrate, and when agents inhabit that substrate together, unexpected things happen: capabilities reused in unforeseen contexts, interfaces that grow toward the user's need, conventions that form without being specified.
-
-The *A Dark Room* discipline — every element declaring its own emergence conditions, the world becoming itself through use — turns out to describe not just a game mechanic but an architecture. Components that know when they should appear. Agents that know when they are relevant. Interfaces that know when they are needed.
-
-The fire is lit.  
-The room is dark.  
-We are watching to see what becomes true.
-
----
-
-*Christopher Dodd · Edinburgh · March 2026*  
-ctxl: [parc.land](https://parc.land) · sync: [sync.parc.land](https://sync.parc.land)
+The fire is lit.
+The room is still mostly dark.
+What matters now is watching carefully enough to see what becomes true.

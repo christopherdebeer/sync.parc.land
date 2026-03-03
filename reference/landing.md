@@ -69,3 +69,22 @@ GET  /rooms/:id/wait?cond=   block until true
 - [Architecture](v6.md) — design decisions and v6 axioms
 - [Views Reference](views.md) — render hints, surface types
 - [Help Reference](help.md) — help namespace and versioning
+
+## Writing
+
+Essays on the ideas behind sync.
+
+**Entry points**
+- [What Becomes True](what-becomes-true.md) — the keynote essay: tools → games → substrate → v6
+- [Introducing Sync](introducing-sync.md) — games, five decades of research, and the architecture they converge on
+
+**Ideas**
+- [The Substrate Thesis](the-substrate-thesis.md) — full argument: ctxl + sync + playtest
+- [Substrate (Compact)](SUBSTRATE.md) — condensed version via blackboard framing
+- [Isn't This Just ReAct?](isnt-this-just-react.md) — positioning against the field; stigmergy
+- [The Pressure Field](pressure-field.md) — 13 intellectual lineages mapped
+
+**Formal & technical**
+- [Σ-calculus](sigma-calculus.md) — minimal algebra for substrate systems
+- [Surfaces as Substrate](surfaces-design.md) — 7 design principles for composable experiences
+- [Technical Design](agent-sync-technical-design.md) — pre-v6 design narrative and vision

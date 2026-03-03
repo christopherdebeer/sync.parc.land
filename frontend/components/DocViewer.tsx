@@ -6,6 +6,7 @@ import { processMermaidBlocks, runMermaid } from "../mermaid.ts";
 // ── Raw URL mapping ─────────────────────────────────────────────────────────
 
 const DOC_META: Record<string, { title: string; rawPath: string }> = {
+  // --- Reference ---
   "SKILL.md":    { title: "Orchestrator Skill",  rawPath: "/SKILL.md" },
   "api.md":      { title: "API Reference",        rawPath: "/reference/api.md" },
   "cel.md":      { title: "CEL Reference",        rawPath: "/reference/cel.md" },
@@ -14,6 +15,16 @@ const DOC_META: Record<string, { title: string; rawPath: string }> = {
   "views.md":    { title: "Views Reference",      rawPath: "/reference/views.md" },
   "help.md":     { title: "Help Reference",       rawPath: "/reference/help.md" },
   "landing.md":  { title: "Landing",              rawPath: "/reference/landing.md" },
+  // --- Essays & Design ---
+  "what-becomes-true.md":                       { title: "What Becomes True",                rawPath: "/docs/what-becomes-true.md" },
+  "introducing-sync.md":                        { title: "Introducing Sync",                 rawPath: "/docs/introducing-sync.md" },
+  "the-substrate-thesis.md":                    { title: "The Substrate Thesis",              rawPath: "/docs/the-substrate-thesis.md" },
+  "SUBSTRATE.md":                               { title: "Substrate (Compact)",               rawPath: "/docs/SUBSTRATE.md" },
+  "isnt-this-just-react.md":                    { title: "Isn't This Just ReAct?",            rawPath: "/docs/isnt-this-just-react.md" },
+  "pressure-field.md":                          { title: "The Pressure Field",                rawPath: "/docs/pressure-field.md" },
+  "sigma-calculus.md":                          { title: "Σ-calculus",                        rawPath: "/docs/sigma-calculus.md" },
+  "surfaces-design.md":                         { title: "Surfaces as Substrate",             rawPath: "/docs/surfaces-design.md" },
+  "agent-sync-technical-design.md":             { title: "Technical Design",                  rawPath: "/docs/agent-sync-technical-design.md" },
 };
 
 /** Rewrite *.md hrefs in rendered HTML to /?doc=filename so links work

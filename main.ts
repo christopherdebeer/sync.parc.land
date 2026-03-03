@@ -16,6 +16,30 @@ for (const name of ["api.md", "cel.md", "examples.md", "surfaces.md", "v6.md", "
   const refUrl = new URL(`./reference/${name}`, import.meta.url);
   REFERENCE_FILES[name] = await fetch(refUrl).then((r) => r.text());
 }
+const DOCS_FILES: Record<string, string> = {};
+{
+  const docsDir = new URL("./docs/", import.meta.url);
+  let names: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(docsDir)) {
+      if (entry.isFile && entry.name.endsWith(".md")) names.push(entry.name);
+    }
+  } catch {
+    // Deno.readDir fails on Val Town's https:// URLs; probe known files
+    for (const name of [
+      "what-becomes-true.md", "introducing-sync.md", "the-substrate-thesis.md",
+      "SUBSTRATE.md", "isnt-this-just-react.md", "pressure-field.md",
+      "sigma-calculus.md", "surfaces-design.md", "agent-sync-technical-design.md",
+    ]) {
+      try {
+        DOCS_FILES[name] = await fetch(new URL(name, docsDir)).then((r) => r.text());
+      } catch { /* skip missing */ }
+    }
+  }
+  for (const name of names) {
+    DOCS_FILES[name] = await fetch(new URL(name, docsDir)).then((r) => r.text());
+  }
+}
 const FRONTEND_HTML_URL = new URL("./frontend/index.html", import.meta.url);
 const FRONTEND_HTML = await fetch(FRONTEND_HTML_URL).then((r) => r.text());
 
@@ -2757,6 +2781,11 @@ async function route(req: Request, _url?: URL): Promise<Response> {
     // Reference docs
     if (method === "GET" && parts[0] === "reference" && parts.length === 2) {
       const doc = REFERENCE_FILES[parts[1]];
+      if (doc) return new Response(doc, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    }
+    // Design essays & docs
+    if (method === "GET" && parts[0] === "docs" && parts.length === 2) {
+      const doc = DOCS_FILES[parts[1]];
       if (doc) return new Response(doc, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }
     return json({ error: "not found" }, 404);

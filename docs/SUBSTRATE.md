@@ -1,5 +1,7 @@
 # The Substrate Thesis
 
+> Condensed version. For the full intellectual genealogy — games, blackboard AI, tuple spaces, FRP, stigmergy, and forty years of converging research — see [Introducing Sync](introducing-sync.md).
+
 **Software is a shared substrate of truth observed by self-activating components.**
 
 Three projects — ctxl, sync, playtest — arrived at this sentence independently, from different starting points. This document explains what it means and why it matters.
