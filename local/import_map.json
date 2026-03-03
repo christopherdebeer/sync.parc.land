@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "https://esm.town/v/std/sqlite": "./sqlite.ts"
+  }
+}

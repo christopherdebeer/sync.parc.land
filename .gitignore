@@ -1,0 +1,6 @@
+local/sync.db
+local/sync.db-wal
+local/sync.db-shm
+.vt/
+.DS_Store
+node_modules/
