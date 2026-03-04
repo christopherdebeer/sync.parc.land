@@ -16,30 +16,6 @@ for (const name of ["api.md", "cel.md", "examples.md", "surfaces.md", "v6.md", "
   const refUrl = new URL(`./reference/${name}`, import.meta.url);
   REFERENCE_FILES[name] = await fetch(refUrl).then((r) => r.text());
 }
-const DOCS_FILES: Record<string, string> = {};
-{
-  const docsDir = new URL("./docs/", import.meta.url);
-  let names: string[] = [];
-  try {
-    for await (const entry of Deno.readDir(docsDir)) {
-      if (entry.isFile && entry.name.endsWith(".md")) names.push(entry.name);
-    }
-  } catch {
-    // Deno.readDir fails on Val Town's https:// URLs; probe known files
-    for (const name of [
-      "what-becomes-true.md", "introducing-sync.md", "the-substrate-thesis.md",
-      "SUBSTRATE.md", "isnt-this-just-react.md", "pressure-field.md",
-      "sigma-calculus.md", "surfaces-design.md", "agent-sync-technical-design.md",
-    ]) {
-      try {
-        DOCS_FILES[name] = await fetch(new URL(name, docsDir)).then((r) => r.text());
-      } catch { /* skip missing */ }
-    }
-  }
-  for (const name of names) {
-    DOCS_FILES[name] = await fetch(new URL(name, docsDir)).then((r) => r.text());
-  }
-}
 const FRONTEND_HTML_URL = new URL("./frontend/index.html", import.meta.url);
 const FRONTEND_HTML = await fetch(FRONTEND_HTML_URL).then((r) => r.text());
 
@@ -53,9 +29,9 @@ const STANDARD_LIBRARY: any[] = [
     description: "Write a named value to shared state",
     params: {
       key: { type: "string", description: "State key" },
-      value: { type: "any", description: "Value to set" },
+      value: { description: "Value to set (any type)" },
     },
-    writes: [{ scope: "_shared", key: "${params.key}", value: "${params.value}" }],
+    writes: [{ scope: "_shared", key: "${params.key}", value: "params.value", expr: true }],
   },
   {
     id: "delete",
@@ -79,9 +55,9 @@ const STANDARD_LIBRARY: any[] = [
     description: "Append an entry to a named log in shared state",
     params: {
       key: { type: "string", description: "Log key" },
-      entry: { type: "any", description: "Entry to append" },
+      entry: { description: "Entry to append (any type)" },
     },
-    writes: [{ scope: "_shared", key: "${params.key}", append: true, value: "${params.entry}" }],
+    writes: [{ scope: "_shared", key: "${params.key}", append: true, value: "params.entry", expr: true }],
   },
   {
     id: "update_objective",
@@ -109,19 +85,20 @@ const STANDARD_LIBRARY: any[] = [
     params: {
       key: { type: "string", description: "Slot key" },
     },
-    if: 'state["_shared"]["${params.key}"] == null || state["_shared"]["${params.key}"] == ""',
+    if: '!(params.key in state["_shared"]) || state["_shared"][params.key] == null || state["_shared"][params.key] == ""',
     writes: [{ scope: "_shared", key: "${params.key}", value: "${self}" }],
   },
   {
     id: "submit_result",
-    description: "Submit a result keyed to your identity (idempotent — overwrites previous submission)",
+    description: "Submit a typed result keyed to your identity (idempotent — overwrites previous submission)",
     params: {
-      result: { type: "any", description: "Your result" },
+      result: { description: "Your result (any type)" },
     },
     writes: [{
       scope: "_shared",
       key: "${self}.result",
-      value: { from: "${self}", result: "${params.result}", at: "${now}" },
+      value: "params.result",
+      expr: true,
     }],
   },
   {
@@ -1513,7 +1490,7 @@ async function invokeAction(roomId: string, actionId: string, body: any, auth: A
         if (def.enum && params[name] !== undefined && !def.enum.includes(params[name])) {
           return json({ error: "invalid_param", param: name, value: params[name], allowed: def.enum }, 400);
         }
-        if (def.type && params[name] !== undefined && typeof params[name] !== def.type) {
+        if (def.type && def.type !== "any" && params[name] !== undefined && typeof params[name] !== def.type) {
           return json({ error: "invalid_param_type", param: name, expected: def.type, actual: typeof params[name] }, 400);
         }
       }
@@ -2016,7 +1993,7 @@ async function appendAuditEntry(roomId: string, agent: string | null, action: st
  * - `actions`: include actions section (default true)
  * - `messages`: include messages section (default true)
  * - `messagesAfter`: seq cursor — only return messages after this seq
- * - `messagesLimit`: max messages to return (default 50, max 200)
+ * - `messagesLimit`: max messages to return (default 100, max 500)
  * - `include`: extra state scopes to include (e.g. "_audit")
  */
 export interface ContextRequest {
@@ -2069,8 +2046,13 @@ async function buildExpandedContext(roomId: string, auth: AuthResult, req: Conte
   let elided: string[] = [];
 
   if (includeMessages) {
-    const messagesLimit = Math.min(req.messagesLimit ?? 50, 200);
-    let msgSql = `SELECT * FROM state WHERE room_id = ? AND scope = '_messages'`;
+    const messagesLimit = Math.min(req.messagesLimit ?? 100, 500);
+    // Explicit column list — omits `version` to avoid INTEGER-affinity overflow on production
+    // databases where the v5→v6 migration silently failed (column already existed as INTEGER).
+    let msgSql = `SELECT scope, key, sort_key, value, revision, updated_at,
+                  timer_json, timer_expires_at, timer_ticks_left, timer_tick_on,
+                  timer_effect, timer_started_at, enabled_expr
+                  FROM state WHERE room_id = ? AND scope = '_messages'`;
     const msgArgs: any[] = [roomId];
     if (req.messagesAfter) {
       msgSql += ` AND sort_key > ?`;
@@ -2117,11 +2099,13 @@ async function buildExpandedContext(roomId: string, auth: AuthResult, req: Conte
 
     // Mark elision if we have more messages than we returned
     if (totalMessages > messagesLimit) {
+      const missing = totalMessages - recentMessages.length;
       messagesSection._elided = {
         total: totalMessages,
         returned: recentMessages.length,
+        missing,
         oldest_seq: oldestSeq,
-        _expand: `?messages_after=0&messages_limit=200`,
+        _expand: `?messages_after=0&messages_limit=${Math.min(totalMessages, 500)}`,
       };
     }
   } else {
@@ -2276,10 +2260,21 @@ async function buildExpandedContext(roomId: string, auth: AuthResult, req: Conte
   if (hasContested) {
     contextHelp.push("contested_actions");
   }
+  // Messages truncated: surface at top-level _context so agents don't miss it
+  if (messagesSection?._elided) {
+    contextHelp.push("context_shaping");
+  }
 
   result._context = {
     sections: Object.keys(result).filter(k => k !== "_context"),
     depth,
+    ...(messagesSection?._elided ? {
+      messages_truncated: {
+        missing: messagesSection._elided.missing,
+        oldest_seq: messagesSection._elided.oldest_seq,
+        _expand: messagesSection._elided._expand,
+      },
+    } : {}),
     ...(contextHelp.length > 0 ? { help: contextHelp } : {}),
     ...(elided.length > 0 ? {
       elided,
@@ -2781,11 +2776,6 @@ async function route(req: Request, _url?: URL): Promise<Response> {
     // Reference docs
     if (method === "GET" && parts[0] === "reference" && parts.length === 2) {
       const doc = REFERENCE_FILES[parts[1]];
-      if (doc) return new Response(doc, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
-    }
-    // Design essays & docs
-    if (method === "GET" && parts[0] === "docs" && parts.length === 2) {
-      const doc = DOCS_FILES[parts[1]];
       if (doc) return new Response(doc, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }
     return json({ error: "not found" }, 404);

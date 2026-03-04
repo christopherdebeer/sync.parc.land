@@ -176,17 +176,31 @@ export async function migrate() {
 
   // ============ v5→v6 migration helpers ============
   // state.version becomes a content hash (TEXT). Add state.revision as sequential integer.
-  // Existing integer version values are migrated: revision = version, version = '' (hash computed on next write).
-  await addColumn("state", "version", "TEXT DEFAULT ''");
-  await addColumn("state", "revision", "INTEGER DEFAULT 1");
-  // Backfill: for existing rows where revision is null/0 and version looks like an integer, copy it over
+  // The addColumn approach silently fails if version already exists as INTEGER (from v5).
+  // Use RENAME COLUMN to fix the affinity on production databases.
   try {
+    // If this succeeds, the column was still INTEGER — rename it, add TEXT version, backfill revision
+    await sqlite.execute({ sql: `ALTER TABLE state RENAME COLUMN version TO version_v5`, args: [] });
+    await sqlite.execute({ sql: `ALTER TABLE state ADD COLUMN version TEXT DEFAULT ''`, args: [] });
+    await sqlite.execute({ sql: `ALTER TABLE state ADD COLUMN revision INTEGER DEFAULT 1`, args: [] });
+    // Migrate: copy integer version into revision, clear version hash (will be recomputed on next write)
     await sqlite.execute({
-      sql: `UPDATE state SET revision = CAST(version AS INTEGER), version = ''
-            WHERE revision IS NULL OR revision = 0 OR revision = 1`,
+      sql: `UPDATE state SET revision = CAST(version_v5 AS INTEGER), version = ''
+            WHERE revision IS NULL OR revision <= 1`,
       args: [],
     });
-  } catch (_) { /* best-effort backfill */ }
+  } catch (_) {
+    // Rename failed — either already migrated (version_v5 exists) or fresh install (version TEXT already set).
+    // Ensure revision column exists and backfill any stragglers.
+    await addColumn("state", "revision", "INTEGER DEFAULT 1");
+    try {
+      await sqlite.execute({
+        sql: `UPDATE state SET revision = 1, version = ''
+              WHERE revision IS NULL OR revision = 0`,
+        args: [],
+      });
+    } catch (_) { /* best-effort */ }
+  }
 
   // views.render_json: render hint for surfaces-as-views
   await addColumn("views", "render_json", "TEXT");
