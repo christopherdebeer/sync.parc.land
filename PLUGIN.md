@@ -74,36 +74,51 @@ Then run `deno task dev` to start the local server.
 
 ## Distribution
 
-### Official Marketplace
+This repo is **self-contained** - it's both a plugin AND a marketplace that lists itself.
+
+### Direct Installation (Current)
+
+Users can install directly from the git repository:
+
+```bash
+/plugin marketplace add christopherdebeer/sync.parc.land
+/plugin install sync@sync
+```
+
+The repo contains both:
+- `.claude-plugin/plugin.json` (plugin manifest)
+- `.claude-plugin/marketplace.json` (marketplace catalog pointing to itself)
+
+### Official Marketplace (Future)
 
 Submit to claude.ai/settings/plugins/submit or console.anthropic.com/plugins/submit
 
-### Team/Private Marketplace
+Once approved, users can install with:
+```bash
+/plugin install sync
+```
 
-Create a marketplace repository with `.claude-plugin/marketplace.json`:
+### Team Distribution
+
+Add to project `.claude/settings.json`:
 
 ```json
 {
-  "name": "team-tools",
-  "owner": { "name": "Your Team" },
-  "plugins": [
-    {
-      "name": "sync",
+  "extraKnownMarketplaces": {
+    "sync": {
       "source": {
         "source": "github",
-        "repo": "your-org/sync.parc.land"
-      },
-      "description": "Multi-agent coordination platform"
+        "repo": "christopherdebeer/sync.parc.land"
+      }
     }
-  ]
+  },
+  "enabledPlugins": {
+    "sync@sync": true
+  }
 }
 ```
 
-Users install with:
-```
-/plugin marketplace add your-org/marketplace-repo
-/plugin install sync@team-tools
-```
+See `INSTALL.md` for complete installation instructions.
 
 ## Key Design Insights
 
