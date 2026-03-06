@@ -23,16 +23,12 @@ for (const name of ["api.md", "cel.md", "examples.md", "surfaces.md", "v6.md", "
   const refUrl = new URL(`./reference/${name}`, import.meta.url);
   REFERENCE_FILES[name] = await fetch(refUrl).then((r) => r.text());
 }
-// Frontend HTML no longer loaded at module scope — SSR renders each page directly
-
-// STANDARD_LIBRARY and HELP_SYSTEM imported from ./help-content.ts
-
 let migrated = false;
 async function ensureMigrated() {
   if (!migrated) { await migrate(); migrated = true; }
 }
 
-// ============ Room handlers ============
+// ── Rooms ──
 
 export async function createRoom(body: any) {
   const id = body.id ?? crypto.randomUUID();
@@ -110,7 +106,7 @@ export async function listRooms(req: Request) {
   return json(rows2objects(result).map(stripHashes));
 }
 
-// ============ Agent handlers ============
+// ── Agents ──
 
 export async function joinRoom(roomId: string, body: any, req: Request) {
   const id = body.id ?? crypto.randomUUID();
@@ -220,14 +216,6 @@ export async function joinRoom(roomId: string, body: any, req: Request) {
   return json({ ...agent, token }, 201);
 }
 
-async function listAgents(roomId: string) {
-  const result = await sqlite.execute({
-    sql: `SELECT * FROM agents WHERE room_id = ? ORDER BY joined_at`,
-    args: [roomId],
-  });
-  return json(rows2objects(result).map((a: any) => { delete a.token_hash; return a; }));
-}
-
 async function updateAgent(roomId: string, agentId: string, body: any) {
   // Only room token / admin can update grants and role
   const sets: string[] = [];
@@ -265,501 +253,7 @@ async function updateAgent(roomId: string, agentId: string, body: any) {
   return json(agent);
 }
 
-// ============ State handlers ============
-
-async function getState(roomId: string, url: URL, auth: AuthResult) {
-  const scope = url.searchParams.get("scope");
-  const key = url.searchParams.get("key");
-  const after = url.searchParams.get("after");
-  const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "100"), 500);
-  const raw = url.searchParams.get("raw");
-
-  let sql = `SELECT * FROM state WHERE room_id = ?`;
-  const args: any[] = [roomId];
-
-  if (scope) {
-    // Scope privacy check: agent can read own scope, _shared, system scopes, or granted scopes
-    if (!scope.startsWith("_") && auth.authenticated && auth.kind === "agent") {
-      if (scope !== auth.agentId && !auth.grants.includes(scope) && !auth.grants.includes("*")) {
-        return json({ error: "scope_denied", message: `cannot read private scope "${scope}"` }, 403);
-      }
-    }
-    sql += ` AND scope = ?`;
-    args.push(scope);
-  } else {
-    // Without scope filter, enforce scope privacy
-    if (hasFullReadAccess(auth)) {
-      // Room token / admin / view token: see everything — no filter
-    } else if (auth.authenticated && auth.kind === "agent") {
-      // Agent: system scopes + own scope + granted scopes
-      const accessibleScopes = [auth.agentId!, ...auth.grants].filter(Boolean);
-      const conditions = [`scope LIKE '\\_%' ESCAPE '\\'`]; // system scopes starting with _
-      for (const s of accessibleScopes) {
-        conditions.push(`scope = ?`);
-        args.push(s);
-      }
-      sql += ` AND (${conditions.join(" OR ")})`;
-    } else {
-      // Unauthenticated: system scopes only (no private agent state)
-      sql += ` AND scope LIKE '\\_%' ESCAPE '\\'`;
-    }
-  }
-
-  if (key) { sql += ` AND key = ?`; args.push(key); }
-  if (after) { sql += ` AND sort_key > ?`; args.push(parseInt(after)); }
-
-  sql += ` ORDER BY CASE WHEN sort_key IS NOT NULL THEN sort_key ELSE 0 END ASC LIMIT ?`;
-  args.push(limit);
-
-  const result = await sqlite.execute({ sql, args });
-  let rows = rows2objects(result);
-
-  // Filter by timer liveness and enabled
-  const ctx = await buildContext(roomId, { selfAgent: auth.agentId ?? undefined });
-  rows = rows.filter((row: any) => {
-    if (!isTimerLive(row)) return false;
-    if (row.enabled_expr) {
-      try { return !!evaluate(row.enabled_expr, ctx); } catch { return false; }
-    }
-    return true;
-  });
-
-  // Parse values unless raw=true
-  if (raw !== "true") {
-    rows = rows.map((row: any) => {
-      try { return { ...row, value: JSON.parse(row.value) }; } catch { return row; }
-    });
-  }
-
-  // Update last_seen_seq for _messages scope reads
-  if (scope === "_messages" && auth.agentId && rows.length > 0) {
-    const maxSeq = Math.max(...rows.map((r: any) => r.sort_key ?? 0));
-    if (maxSeq > 0) {
-      sqlite.execute({
-        sql: `UPDATE agents SET last_seen_seq = MAX(last_seen_seq, ?) WHERE id = ? AND room_id = ?`,
-        args: [maxSeq, auth.agentId, roomId],
-      }).catch(() => {});
-    }
-  }
-
-  if (scope && key) {
-    return rows[0] ? json(rows[0]) : json({ error: "not found" }, 404);
-  }
-  return json(rows);
-}
-
-async function setState(roomId: string, body: any, auth: AuthResult) {
-  const scope = body.scope ?? "_shared";
-  const key = body.key;
-  const append = body.append === true;
-  const merge = body.merge;
-  const increment = !!body.increment;
-  const incrementAmount = typeof body.increment === "number" ? body.increment : (body.value ?? 1);
-
-  if (!append && !key) return json({ error: "key is required (or use append: true)" }, 400);
-
-  // Scope authority check
-  const scopeCheck = checkScopeAuthority(auth, scope);
-  if (scopeCheck) return scopeCheck;
-
-  touchAgent(roomId, auth.agentId);
-
-  // Timer/enabled validation
-  if (body.enabled) {
-    const v = validateCel(body.enabled);
-    if (!v.valid) return json({ error: "invalid_cel", field: "enabled", detail: v.error }, 400);
-  }
-  let timerCols = parseTimer(null);
-  if (body.timer) {
-    const tv = validateTimer(body.timer);
-    if (!tv.valid) return json({ error: "invalid_timer", detail: tv.error }, 400);
-    timerCols = parseTimer(body.timer);
-  }
-  const enabledExpr = body.enabled ?? null;
-  const timerArgs = [timerCols.timer_json, timerCols.timer_expires_at, timerCols.timer_ticks_left,
-                     timerCols.timer_tick_on, timerCols.timer_effect, timerCols.timer_started_at];
-
-  // CEL write gate
-  if (body.if) {
-    if (typeof body.if !== "string") return json({ error: "if must be a CEL expression string" }, 400);
-    const celResult = await evalCel(roomId, body.if);
-    if (!celResult.ok) return json({ error: "cel_error", expression: body.if, detail: celResult.error }, 400);
-    if (!celResult.value) return json({ error: "precondition_failed", expression: body.if, evaluated: celResult.value }, 409);
-  }
-
-  // Append mode
-  let actualKey = key;
-  let sortKey: number | null = null;
-  let arrayPushValue: any = undefined;
-  if (append) {
-    if (key) {
-      // Array-push: append value to JSON array stored at this key
-      const existing = await sqlite.execute({
-        sql: `SELECT value FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-        args: [roomId, scope, key],
-      });
-      let arr: any[] = [];
-      if (existing.rows.length > 0) {
-        try {
-          const parsed = JSON.parse(existing.rows[0][0] as string);
-          arr = Array.isArray(parsed) ? parsed : [parsed];
-        } catch { arr = []; }
-      }
-      if (body.value === undefined) return json({ error: "value is required for array append" }, 400);
-      arr.push(body.value);
-      arrayPushValue = arr;
-    } else {
-      // Log-row: auto-assign sort_key, auto-generate key
-      const seqResult = await sqlite.execute({
-        sql: `SELECT COALESCE(MAX(sort_key), 0) + 1 as next_seq FROM state WHERE room_id = ? AND scope = ?`,
-        args: [roomId, scope],
-      });
-      sortKey = Number(rows2objects(seqResult)[0]?.next_seq ?? 1);
-      actualKey = String(sortKey);
-    }
-  }
-
-  // Merge mode: read existing, deep merge
-  if (merge && typeof merge === "object") {
-    const existing = await sqlite.execute({
-      sql: `SELECT value FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-      args: [roomId, scope, actualKey],
-    });
-    let currentValue: any = {};
-    if (existing.rows.length > 0) {
-      try { currentValue = JSON.parse(existing.rows[0][0] as string); } catch {}
-    }
-    const merged = deepMerge(currentValue, merge);
-    const value = JSON.stringify(merged);
-    const vHash = await contentHash(value);
-
-    if (body.if_version !== undefined) {
-      const expected = String(body.if_version);
-      const result = await sqlite.execute({
-        sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now'),
-              sort_key = COALESCE(?, sort_key), enabled_expr = ?, timer_json = ?, timer_expires_at = ?,
-              timer_ticks_left = ?, timer_tick_on = ?, timer_effect = ?, timer_started_at = ?
-              WHERE room_id = ? AND scope = ? AND key = ? AND version = ?`,
-        args: [value, vHash, sortKey, enabledExpr, ...timerArgs, roomId, scope, actualKey, expected],
-      });
-      if (result.rowsAffected === 0) {
-        const current = await sqlite.execute({
-          sql: `SELECT * FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-          args: [roomId, scope, actualKey],
-        });
-        const row = rows2objects(current)[0];
-        return json({ error: "version_conflict", expected_version: expected, current: row ?? null }, 409);
-      }
-    } else {
-      await sqlite.execute({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
-                timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = excluded.version, revision = state.revision + 1,
-                updated_at = datetime('now'),
-                sort_key = COALESCE(excluded.sort_key, state.sort_key),
-                enabled_expr = excluded.enabled_expr,
-                timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
-                timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
-                timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, scope, actualKey, sortKey, value, vHash, enabledExpr, ...timerArgs],
-      });
-    }
-  } else if (increment) {
-    // Increment: read current, compute new value in TypeScript so we can hash it
-    const existingInc = await sqlite.execute({
-      sql: `SELECT value, revision FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-      args: [roomId, scope, actualKey],
-    });
-    const currentNum = existingInc.rows.length > 0
-      ? (parseInt(existingInc.rows[0][0] as string) || 0)
-      : 0;
-    const newNum = currentNum + (typeof incrementAmount === "number" ? incrementAmount : parseInt(String(incrementAmount)) || 0);
-    const newValue = String(newNum);
-    const vHash = await contentHash(newValue);
-    if (existingInc.rows.length > 0) {
-      await sqlite.execute({
-        sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now'),
-              enabled_expr = COALESCE(?, enabled_expr),
-              timer_json = COALESCE(?, timer_json), timer_expires_at = COALESCE(?, timer_expires_at),
-              timer_ticks_left = COALESCE(?, timer_ticks_left), timer_tick_on = COALESCE(?, timer_tick_on),
-              timer_effect = COALESCE(?, timer_effect), timer_started_at = COALESCE(?, timer_started_at)
-              WHERE room_id = ? AND scope = ? AND key = ?`,
-        args: [newValue, vHash, enabledExpr, ...timerArgs, roomId, scope, actualKey],
-      });
-    } else {
-      await sqlite.execute({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
-                timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
-        args: [roomId, scope, actualKey, sortKey, newValue, vHash, enabledExpr, ...timerArgs],
-      });
-    }
-  } else {
-    // Standard set (full value replacement)
-    const rawValue = arrayPushValue !== undefined ? arrayPushValue : body.value;
-    const value = typeof rawValue === "string" ? rawValue : JSON.stringify(rawValue);
-    const vHash = await contentHash(value);
-
-    if (body.if_version !== undefined) {
-      const expected = String(body.if_version);
-      const result = await sqlite.execute({
-        sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now'),
-              sort_key = COALESCE(?, sort_key), enabled_expr = ?,
-              timer_json = ?, timer_expires_at = ?, timer_ticks_left = ?,
-              timer_tick_on = ?, timer_effect = ?, timer_started_at = ?
-              WHERE room_id = ? AND scope = ? AND key = ? AND version = ?`,
-        args: [value, vHash, sortKey, enabledExpr, ...timerArgs, roomId, scope, actualKey, expected],
-      });
-      if (result.rowsAffected === 0) {
-        const current = await sqlite.execute({
-          sql: `SELECT * FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-          args: [roomId, scope, actualKey],
-        });
-        const row = rows2objects(current)[0];
-        if (row) return json({ error: "version_conflict", expected_version: expected, current: row }, 409);
-        if (expected !== "") return json({ error: "not_found", message: "key does not exist, use if_version='' to create" }, 404);
-        await sqlite.execute({
-          sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
-                  timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-                VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
-          args: [roomId, scope, actualKey, sortKey, value, vHash, enabledExpr, ...timerArgs],
-        });
-      }
-    } else {
-      await sqlite.execute({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
-                timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = excluded.version, revision = state.revision + 1,
-                updated_at = datetime('now'),
-                sort_key = COALESCE(excluded.sort_key, state.sort_key),
-                enabled_expr = excluded.enabled_expr,
-                timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
-                timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
-                timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, scope, actualKey, sortKey, value, vHash, enabledExpr, ...timerArgs],
-      });
-    }
-  }
-
-  // Tick logical timers
-  await tickLogicalTimers(roomId, scope, actualKey);
-
-  // Auto-view for public: true on private scopes
-  if (body.public === true && !scope.startsWith("_")) {
-    await ensureAutoView(roomId, scope, actualKey, auth);
-  } else if (body.public === false && !scope.startsWith("_")) {
-    await removeAutoView(roomId, scope, actualKey);
-  }
-
-  const result = await sqlite.execute({
-    sql: `SELECT * FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-    args: [roomId, scope, actualKey],
-  });
-  const row = rows2objects(result)[0];
-  if (row) {
-    try { row.value = JSON.parse(row.value); } catch {}
-  }
-  return json(row);
-}
-
-async function batchSetState(roomId: string, body: any, auth: AuthResult) {
-  const writes = body.writes;
-  if (!Array.isArray(writes) || writes.length === 0) return json({ error: "writes array is required" }, 400);
-  if (writes.length > 20) return json({ error: "max 20 writes per batch" }, 400);
-
-  // Check scope authority for all writes
-  for (const w of writes) {
-    const scope = w.scope ?? "_shared";
-    const scopeCheck = checkScopeAuthority(auth, scope);
-    if (scopeCheck) return scopeCheck;
-  }
-
-  touchAgent(roomId, auth.agentId);
-
-  // CEL write gate
-  if (body.if) {
-    if (typeof body.if !== "string") return json({ error: "if must be a CEL expression string" }, 400);
-    const celResult = await evalCel(roomId, body.if);
-    if (!celResult.ok) return json({ error: "cel_error", expression: body.if, detail: celResult.error }, 400);
-    if (!celResult.value) return json({ error: "precondition_failed", expression: body.if, evaluated: celResult.value }, 409);
-  }
-
-  const statements: any[] = [];
-  const tickKeys: { scope: string; key: string }[] = [];
-
-  for (const w of writes) {
-    const scope = w.scope ?? "_shared";
-    const append = w.append === true;
-    let key = w.key;
-    let sortKey: number | null = null;
-
-    let timerCols = parseTimer(null);
-    if (w.timer) {
-      const tv = validateTimer(w.timer);
-      if (!tv.valid) return json({ error: "invalid_timer", key, detail: tv.error }, 400);
-      timerCols = parseTimer(w.timer);
-    }
-    const enabledExpr = w.enabled ?? null;
-    const timerArgsBatch = [timerCols.timer_json, timerCols.timer_expires_at, timerCols.timer_ticks_left,
-                       timerCols.timer_tick_on, timerCols.timer_effect, timerCols.timer_started_at];
-
-    let arrayPushBatch: any = undefined;
-    if (append) {
-      if (key) {
-        // Array-push: append value to JSON array stored at this key
-        const existing = await sqlite.execute({
-          sql: `SELECT value FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-          args: [roomId, scope, key],
-        });
-        let arr: any[] = [];
-        if (existing.rows.length > 0) {
-          try {
-            const parsed = JSON.parse(existing.rows[0][0] as string);
-            arr = Array.isArray(parsed) ? parsed : [parsed];
-          } catch { arr = []; }
-        }
-        if (w.value === undefined) return json({ error: "value is required for array append", key }, 400);
-        arr.push(w.value);
-        arrayPushBatch = arr;
-      } else {
-        const seqResult = await sqlite.execute({
-          sql: `SELECT COALESCE(MAX(sort_key), 0) + 1 as next_seq FROM state WHERE room_id = ? AND scope = ?`,
-          args: [roomId, scope],
-        });
-        sortKey = Number(rows2objects(seqResult)[0]?.next_seq ?? 1);
-        key = String(sortKey);
-      }
-    }
-
-    if (!key) return json({ error: "each write needs a key (or use append: true)" }, 400);
-    tickKeys.push({ scope, key });
-
-    // Merge support in batch
-    if (w.merge && typeof w.merge === "object") {
-      const existing = await sqlite.execute({
-        sql: `SELECT value FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-        args: [roomId, scope, key],
-      });
-      let currentValue: any = {};
-      if (existing.rows.length > 0) {
-        try { currentValue = JSON.parse(existing.rows[0][0] as string); } catch {}
-      }
-      const merged = JSON.stringify(deepMerge(currentValue, w.merge));
-      const vHash = await contentHash(merged);
-      statements.push({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
-                timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = excluded.version, revision = state.revision + 1,
-                updated_at = datetime('now'),
-                sort_key = COALESCE(excluded.sort_key, state.sort_key),
-                enabled_expr = excluded.enabled_expr,
-                timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
-                timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
-                timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, scope, key, sortKey, merged, vHash, enabledExpr, ...timerArgsBatch],
-      });
-    } else if (w.increment) {
-      const batchIncrementAmount = typeof w.increment === "number" ? w.increment : (w.value ?? 1);
-      const existingInc = await sqlite.execute({
-        sql: `SELECT value FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-        args: [roomId, scope, key],
-      });
-      const currentNum = existingInc.rows.length > 0 ? (parseInt(existingInc.rows[0][0] as string) || 0) : 0;
-      const newNum = currentNum + batchIncrementAmount;
-      const newValue = String(newNum);
-      const vHash = await contentHash(newValue);
-      if (existingInc.rows.length > 0) {
-        statements.push({
-          sql: `UPDATE state SET value = ?, version = ?, revision = revision + 1, updated_at = datetime('now'),
-                enabled_expr = COALESCE(?, enabled_expr),
-                timer_json = COALESCE(?, timer_json), timer_expires_at = COALESCE(?, timer_expires_at),
-                timer_ticks_left = COALESCE(?, timer_ticks_left), timer_tick_on = COALESCE(?, timer_tick_on),
-                timer_effect = COALESCE(?, timer_effect), timer_started_at = COALESCE(?, timer_started_at)
-                WHERE room_id = ? AND scope = ? AND key = ?`,
-          args: [newValue, vHash, enabledExpr, ...timerArgsBatch, roomId, scope, key],
-        });
-      } else {
-        statements.push({
-          sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
-                  timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-                VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
-          args: [roomId, scope, key, sortKey, newValue, vHash, enabledExpr, ...timerArgsBatch],
-        });
-      }
-    } else {
-      const rawBatch = arrayPushBatch !== undefined ? arrayPushBatch : w.value;
-      const value = typeof rawBatch === "string" ? rawBatch : JSON.stringify(rawBatch);
-      const vHash = await contentHash(value);
-      statements.push({
-        sql: `INSERT INTO state (room_id, scope, key, sort_key, value, version, revision, updated_at, enabled_expr,
-                timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at)
-              VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(room_id, scope, key) DO UPDATE SET
-                value = excluded.value, version = excluded.version, revision = state.revision + 1,
-                updated_at = datetime('now'),
-                sort_key = COALESCE(excluded.sort_key, state.sort_key),
-                enabled_expr = excluded.enabled_expr,
-                timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
-                timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
-                timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at`,
-        args: [roomId, scope, key, sortKey, value, vHash, enabledExpr, ...timerArgsBatch],
-      });
-    }
-  }
-
-  if (statements.length > 0) await sqlite.batch(statements);
-
-  for (const tk of tickKeys) {
-    await tickLogicalTimers(roomId, tk.scope, tk.key);
-  }
-
-  // Auto-views for public: true in batch writes
-  for (let i = 0; i < writes.length; i++) {
-    const w = writes[i];
-    const scope = w.scope ?? "_shared";
-    const key = tickKeys[i]?.key;
-    if (key && !scope.startsWith("_")) {
-      if (w.public === true) await ensureAutoView(roomId, scope, key, auth);
-      else if (w.public === false) await removeAutoView(roomId, scope, key);
-    }
-  }
-
-  // Return written state
-  const results: any[] = [];
-  for (const tk of tickKeys) {
-    const result = await sqlite.execute({
-      sql: `SELECT * FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-      args: [roomId, tk.scope, tk.key],
-    });
-    const row = rows2objects(result)[0];
-    if (row) {
-      try { row.value = JSON.parse(row.value); } catch {}
-      results.push(row);
-    }
-  }
-  return json({ ok: true, count: results.length, state: results });
-}
-
-async function deleteState(roomId: string, body: any, auth: AuthResult) {
-  const scope = body.scope ?? "_shared";
-  const key = body.key;
-  if (!key) return json({ error: "key is required" }, 400);
-  const scopeCheck = checkScopeAuthority(auth, scope);
-  if (scopeCheck) return scopeCheck;
-  await sqlite.execute({
-    sql: `DELETE FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
-    args: [roomId, scope, key],
-  });
-  return json({ deleted: true });
-}
-
-// ============ Action handlers ============
+// ── Actions ──
 
 function formatAction(row: any) {
   const out: any = {
@@ -777,7 +271,7 @@ function formatAction(row: any) {
   return out;
 }
 
-/** Compute contested write targets across all live actions in a room.
+/**
  *
  * Returns a map of "scope:key" → [actionId, ...] for any (scope, key) pair
  * that is the write target of two or more registered actions.
@@ -892,59 +386,6 @@ export async function registerAction(roomId: string, body: any, auth: AuthResult
   }
 
   return json(saved, 201);
-}
-
-async function listActions(roomId: string, url: URL, auth: AuthResult) {
-  const expand = url.searchParams.get("expand_params");
-  const result = await sqlite.execute({ sql: `SELECT * FROM actions WHERE room_id = ? ORDER BY created_at`, args: [roomId] });
-  let rows = rows2objects(result);
-
-  rows = rows.filter((row: any) => isTimerLive(row));
-  const ctx = await buildContext(roomId, { selfAgent: auth.agentId ?? undefined });
-
-  rows = rows.filter((row: any) => {
-    if (!row.enabled_expr) return true;
-    try { return !!evaluate(row.enabled_expr, ctx); } catch { return false; }
-  });
-
-  const actions = rows.map((row: any) => {
-    const action = formatAction(row);
-    if (row.if_expr) {
-      try { action.available = !!evaluate(row.if_expr, ctx); } catch { action.available = false; }
-    } else {
-      action.available = true;
-    }
-
-    if (expand === "true" && row.params_json) {
-      try {
-        const params = JSON.parse(row.params_json);
-        const availability_by_param: any = {};
-        for (const [paramName, paramDef] of Object.entries(params as Record<string, any>)) {
-          if (paramDef.enum && row.if_expr) {
-            availability_by_param[paramName] = {};
-            for (const enumVal of paramDef.enum) {
-              try {
-                const paramCtx = { ...ctx, params: { [paramName]: enumVal } };
-                availability_by_param[paramName][enumVal] = { available: !!evaluate(row.if_expr, paramCtx) };
-              } catch { availability_by_param[paramName][enumVal] = { available: false }; }
-            }
-          }
-        }
-        if (Object.keys(availability_by_param).length > 0) action.availability_by_param = availability_by_param;
-      } catch {}
-    }
-    return action;
-  });
-
-  return json(actions);
-}
-
-async function getAction(roomId: string, actionId: string) {
-  const result = await sqlite.execute({ sql: `SELECT * FROM actions WHERE id = ? AND room_id = ?`, args: [actionId, roomId] });
-  const row = rows2objects(result)[0];
-  if (!row) return json({ error: "action not found" }, 404);
-  if (!isTimerLive(row)) return json({ error: "action not found" }, 404);
-  return json(formatAction(row));
 }
 
 export async function deleteAction(roomId: string, actionId: string, auth: AuthResult) {
@@ -1308,7 +749,7 @@ export async function invokeAction(roomId: string, actionId: string, body: any, 
   return json(response);
 }
 
-// ============ View handlers ============
+// ── Views ──
 
 export async function registerView(roomId: string, body: any, auth: AuthResult) {
   const id = body.id;
@@ -1385,67 +826,6 @@ export async function registerView(roomId: string, body: any, auth: AuthResult) 
   }, 201);
 }
 
-async function listViews(roomId: string, auth: AuthResult) {
-  const result = await sqlite.execute({ sql: `SELECT * FROM views WHERE room_id = ? ORDER BY created_at`, args: [roomId] });
-  let rows = rows2objects(result);
-
-  rows = rows.filter((row: any) => isTimerLive(row));
-
-  const ctx = await buildContext(roomId, { selfAgent: auth.agentId ?? undefined });
-
-  // Filter by enabled and resolve values
-  const views: any[] = [];
-  for (const row of rows) {
-    if (row.enabled_expr) {
-      try { if (!evaluate(row.enabled_expr, ctx)) continue; } catch { continue; }
-    }
-    const viewCtx = await buildViewContext(roomId, row.scope, ctx);
-    let value: any = null;
-    try {
-      const evalResult = evaluate(row.expr, viewCtx);
-      value = typeof evalResult === "bigint" ? Number(evalResult) : evalResult;
-    } catch (e: any) {
-      value = { _error: e.message };
-    }
-    views.push({
-      id: row.id, room_id: row.room_id, scope: row.scope, description: row.description,
-      expr: row.expr, enabled: row.enabled_expr,
-      render: row.render_json ? (() => { try { return JSON.parse(row.render_json); } catch { return null; } })() : null,
-      registered_by: row.registered_by,
-      version: row.version, created_at: row.created_at,
-      value,
-    });
-  }
-
-  return json(views);
-}
-
-async function getView(roomId: string, viewId: string, auth: AuthResult) {
-  const result = await sqlite.execute({ sql: `SELECT * FROM views WHERE id = ? AND room_id = ?`, args: [viewId, roomId] });
-  const row = rows2objects(result)[0];
-  if (!row) return json({ error: "view not found" }, 404);
-  if (!isTimerLive(row)) return json({ error: "view not found" }, 404);
-
-  const ctx = await buildContext(roomId, { selfAgent: auth.agentId ?? undefined });
-  const viewCtx = await buildViewContext(roomId, row.scope, ctx);
-  let value: any = null;
-  try {
-    const evalResult = evaluate(row.expr, viewCtx);
-    value = typeof evalResult === "bigint" ? Number(evalResult) : evalResult;
-  } catch (e: any) {
-    value = { _error: e.message };
-  }
-
-  return json({
-    id: row.id, room_id: row.room_id, scope: row.scope, description: row.description,
-    expr: row.expr, enabled: row.enabled_expr,
-    render: row.render_json ? (() => { try { return JSON.parse(row.render_json); } catch { return null; } })() : null,
-    registered_by: row.registered_by,
-    version: row.version, created_at: row.created_at,
-    value,
-  });
-}
-
 export async function deleteView(roomId: string, viewId: string, auth: AuthResult) {
   const existing = await sqlite.execute({ sql: `SELECT scope FROM views WHERE id = ? AND room_id = ?`, args: [viewId, roomId] });
   if (existing.rows.length === 0) return json({ error: "view not found" }, 404);
@@ -1459,7 +839,7 @@ export async function deleteView(roomId: string, viewId: string, auth: AuthResul
   return json({ deleted: true, id: viewId });
 }
 
-// ============ Built-in actions ============
+// ── Builtins ──
 
 const BUILTIN_ACTIONS: Record<string, { description: string; params?: Record<string, any> }> = {
   _send_message: {
@@ -1978,7 +1358,7 @@ export async function invokeBuiltinAction(roomId: string, actionId: string, body
   }
 }
 
-// ============ Context endpoint ============
+// ── Context ──
 
 async function getContext(roomId: string, url: URL, auth: AuthResult) {
   touchAgent(roomId, auth.agentId);
@@ -1987,7 +1367,7 @@ async function getContext(roomId: string, url: URL, auth: AuthResult) {
   return json(fullCtx);
 }
 
-// ============ Dashboard poll endpoint ============
+// ── Dashboard poll ──
 
 /** Single-request bundle for dashboard polling. Returns all data sets in one response. */
 async function dashboardPoll(roomId: string, url: URL, auth: AuthResult) {
@@ -2102,35 +1482,7 @@ async function dashboardPoll(roomId: string, url: URL, auth: AuthResult) {
     ...(Object.keys(contestedTargets).length > 0 ? { _contested: contestedTargets } : {}) });
 }
 
-// ============ Auto-view helper ============
-
-/** Create or update an auto-view for a state entry marked public: true */
-async function ensureAutoView(roomId: string, scope: string, key: string, auth: AuthResult) {
-  const viewId = `${scope}.${key}`;
-  const expr = `state["${scope}"]["${key}"]`;
-  const registeredBy = scope;
-
-  await sqlite.execute({
-    sql: `INSERT INTO views (id, room_id, scope, description, expr, registered_by, version)
-          VALUES (?, ?, ?, ?, ?, ?, 1)
-          ON CONFLICT(id, room_id) DO UPDATE SET
-            expr = excluded.expr, scope = excluded.scope,
-            registered_by = excluded.registered_by,
-            version = views.version + 1`,
-    args: [viewId, roomId, scope, `auto: ${scope}.${key}`, expr, registeredBy],
-  });
-}
-
-/** Remove an auto-view when public: false */
-async function removeAutoView(roomId: string, scope: string, key: string) {
-  const viewId = `${scope}.${key}`;
-  await sqlite.execute({
-    sql: `DELETE FROM views WHERE id = ? AND room_id = ? AND description LIKE 'auto:%'`,
-    args: [viewId, roomId],
-  });
-}
-
-// ============ View token rotation ============
+// ── View token rotation ──
 
 async function rotateViewToken(roomId: string) {
   const viewToken = generateToken("view");
@@ -2143,7 +1495,7 @@ async function rotateViewToken(roomId: string) {
   return json({ ok: true, view_token: viewToken });
 }
 
-// ============ CEL eval endpoint ============
+// ── CEL eval ──
 
 export async function evalExpression(roomId: string, body: any, auth: AuthResult) {
   const expr = body.expr;
@@ -2155,7 +1507,7 @@ export async function evalExpression(roomId: string, body: any, auth: AuthResult
   return json({ expression: expr, value: result.value });
 }
 
-// ============ Conditional Wait ============
+// ── Wait ──
 
 const MAX_WAIT_MS = 25_000;
 const POLL_INTERVAL_MS = 1_000;
@@ -2243,8 +1595,7 @@ export async function waitForCondition(roomId: string, url: URL, auth: AuthResul
   }
 }
 
-/** Strip null values from JSON-serializable data */
-// ============ Router ============
+// ── Router ──
 
 export default async function (req: Request) {
   await ensureMigrated();
