@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sync": {
+      "type": "http",
+      "url": "https://sync.parc.land/mcp",
+      "description": "Programmatic tools for sync.parc.land coordination platform",
+      "authentication": {
+        "type": "oauth2",
+        "discoveryUrl": "https://sync.parc.land/.well-known/oauth-authorization-server"
+      }
+    }
+  }
+}
