@@ -17,6 +17,7 @@ import {
   deleteView,
   evalExpression,
   listRooms,
+  waitForCondition,
   type ContextRequest,
 } from "../main.ts";
 
@@ -432,21 +433,15 @@ Returns: { triggered: true/false, condition, context }`,
       await ensureMigrated();
       const resolved = await resolveForTool(ctx, params);
 
-      // waitForCondition takes a URL — construct one with query params
+      // Construct URL with query params for waitForCondition
       const url = new URL(`http://internal/rooms/${resolved.room}/wait`);
       url.searchParams.set("condition", params.condition as string);
       if (params.timeout) url.searchParams.set("timeout", String(params.timeout));
       if (params.depth) url.searchParams.set("depth", params.depth as string);
       if (params.only) url.searchParams.set("only", params.only as string);
 
-      // Import waitForCondition dynamically since it's not in the initial exports list
-      // Actually, we can use the CEL eval + sleep loop directly, but the exported function is simpler
-      // For now, use the sync API's wait endpoint via the exported function
-      // TODO: import and call waitForCondition directly once exported
-      const SYNC_URL = "https://sync.parc.land";
-      const res = await fetch(`${SYNC_URL}/rooms/${resolved.room}/wait?${url.searchParams.toString()}`, {
-        headers: { Authorization: `Bearer ${resolved.token}` },
-      });
+      const auth = await tokenToAuth(resolved.token, resolved.room);
+      const res = await waitForCondition(resolved.room, url, auth);
       return res.json();
     },
   },

@@ -7,6 +7,7 @@ import {
   useState,
 } from "https://esm.sh/react@18.2.0";
 import { styled } from "../styled.ts";
+import { Nav } from "./Nav.tsx";
 import type { Agent, DashboardConfig, PollData, Surface, TokenKind, View } from "../types.ts";
 import { JsonView } from "./JsonView.tsx";
 import { AgentsPanel } from "./panels/Agents.tsx";
@@ -652,6 +653,7 @@ export function Dashboard({ roomId }: DashboardProps) {
 
   return (
     <Page>
+      <Nav active="dashboard" />
       <Main>
         <Headers>
           <HeaderRow>
@@ -659,7 +661,7 @@ export function Dashboard({ roomId }: DashboardProps) {
               <Title>
                 <a href="/">{titleText}</a>
                 {!dashConfig?.title && (
-                  <span style={{ color: "var(--dim)", fontWeight: 400 }}> v5</span>
+                  <span style={{ color: "var(--dim)", fontWeight: 400 }}> v6</span>
                 )}
               </Title>
               <Subtitle>{subtitleText}</Subtitle>

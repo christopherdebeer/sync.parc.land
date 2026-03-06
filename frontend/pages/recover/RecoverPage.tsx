@@ -10,6 +10,7 @@
  * adds the WebAuthn interactivity.
  */
 import { useState, useRef } from "https://esm.sh/react@18.2.0";
+import { Nav } from "../../components/Nav.tsx";
 import {
   PageWrapper,
   Container,
@@ -134,15 +135,17 @@ export function RecoverPage({ origin }: RecoverPageProps) {
   }
 
   return (
-    <PageWrapper>
-      <Container>
+    <>
+      <Nav />
+      <PageWrapper>
+        <Container>
         {step === "token" && (
           <Card>
             <Title>
-              sync<TitleDim>·mcp</TitleDim>
+              sync<TitleDim>recover</TitleDim>
             </Title>
             <Subtitle>
-              Enter your recovery token to register a new passkey for your
+              Enter your recovery token to register a new passkey for an
               existing account.
             </Subtitle>
             <form onSubmit={handleValidateToken}>
@@ -195,6 +198,7 @@ export function RecoverPage({ origin }: RecoverPageProps) {
           </Card>
         )}
       </Container>
-    </PageWrapper>
+      </PageWrapper>
+    </>
   );
 }

@@ -28,9 +28,10 @@ This means README.md must:
 When editing README.md, you are editing the skill definition that other Claude
 instances will read to learn how to use this platform. Write for that audience.
 
-## v5 architecture (context-first)
+## v6 architecture (context-first, vocabulary-first)
 
-Two operations: **read context**, **invoke actions**.
+Two operations: **read context**, **invoke actions**. Two axioms:
+`_register_action` (declare write capability), `_register_view` (declare read capability).
 
 - `GET /context` — returns everything (state, views, agents, actions with defs, messages with bodies)
 - `POST /actions/:id/invoke` — the only write endpoint (builtin and custom actions)
@@ -39,9 +40,9 @@ Two operations: **read context**, **invoke actions**.
 10 total endpoints. Every write flows through action invocation.
 Every invocation is logged to `_audit` scope.
 
-There are NO direct write endpoints for state, actions, views, or messages.
-All writes go through built-in actions (`_set_state`, `_register_action`, etc.)
-or custom actions.
+There is no `_set_state`. Agents declare write capabilities as actions, then invoke them.
+The standard library (`help({ key: "standard_library" })`) provides ready-to-register
+patterns for common operations (set, delete, increment, append, etc.).
 
 ## Project structure
 
@@ -49,11 +50,13 @@ or custom actions.
 main.ts          — HTTP router, all endpoint handlers, built-in actions, audit logging
 auth.ts          — Token generation, hashing, scope authority checks
 cel.ts           — CEL context builder, expression evaluation, view context
-schema.ts        — SQLite schema and v4→v5 migration
+schema.ts        — SQLite schema and migrations
 timers.ts        — Wall-clock and logical-clock timer lifecycle
-dashboard.ts     — Browser dashboard (auth-gated, single HTML response)
-README.md        — Skill definition (served at root)
-reference/       — Detailed docs (api.md, cel.md, examples.md, surfaces.md)
+mcp/             — MCP server (OAuth 2.1 + WebAuthn + token vault + 16 tools)
+frontend/        — React SPA (SSR + hydration: landing, dashboard, docs, auth pages)
+README.md        — Skill definition (served at root as SKILL.md)
+reference/       — Detailed docs (api.md, cel.md, examples.md, views.md, help.md, v6.md)
+docs/            — Essays and design documents
 ```
 
 ## Dashboard tabs
@@ -61,28 +64,19 @@ reference/       — Detailed docs (api.md, cel.md, examples.md, surfaces.md)
 Agents, State, Messages, Actions, Views, Audit, CEL Console.
 The Audit tab shows every action invocation with success/failure status.
 
-## Surfaces (branch: surfaces)
+## Surfaces (views with render hints)
 
-The `surfaces` branch adds declarative UI composition to the dashboard.
+In v6, surfaces are views with a `render` hint — no separate `_dashboard`
+config blob required. Register a view with `render: { type: "metric", label: "Score" }`
+and the dashboard renders it automatically.
+
 Key files:
 
 - `frontend/types.ts` — Surface type definitions and `DashboardConfig` interface
 - `frontend/components/panels/Surfaces.tsx` — Renderer for all 10 surface types
-- `frontend/components/Dashboard.tsx` — Consumes `state._shared._dashboard`,
-  switches between surface mode and classic tab mode, includes client-side
-  CEL evaluator for `enabled` expressions
-- `reference/surfaces.md` — Full reference doc
-
-### Client-side CEL evaluator
-
-`Dashboard.tsx` has `makeSimpleCelEvaluator()` for evaluating surface `enabled`
-expressions in the browser. Key behavior:
-
-- Supports `state.<scope>.<key>` comparisons, `views["id"]`, `&&`, `||`
-- **Loose equality:** `undefined == false` returns `true` (missing state keys
-  are treated as falsy). This is critical for gating on discovery flags that
-  haven't been set yet.
-- **Fail-closed:** Unrecognized expressions return `false` (hide the surface).
+- `frontend/components/Dashboard.tsx` — Renders views with `render` defined,
+  falls back to classic tab mode when no surfaces exist
+- `reference/views.md` — Views reference including render hints
 
 ### Surface types
 

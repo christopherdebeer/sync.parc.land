@@ -16,14 +16,8 @@ import apiHandler from "../main.ts";
 
 const app = new Hono();
 
-// ---- Frontend HTML (fresh from disk each request for live editing) ----
-app.get("/", async (c) => {
-  const htmlPath = new URL("../frontend/index.html", import.meta.url);
-  const html = await Deno.readTextFile(htmlPath);
-  return c.html(html);
-});
-
 // ---- Frontend module transpilation (replaces esm.town CDN proxy) ----
+// Root route (/) falls through to main.ts which does SSR rendering.
 app.get("/frontend/*", async (c) => {
   const reqPath = new URL(c.req.url).pathname;
   const filePath = new URL(".." + reqPath, import.meta.url);

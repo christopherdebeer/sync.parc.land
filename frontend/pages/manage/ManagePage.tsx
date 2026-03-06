@@ -9,12 +9,15 @@
  */
 import { useState, useCallback } from "https://esm.sh/react@18.2.0";
 import { styled } from "../../styled.ts";
+import { Nav } from "../../components/Nav.tsx";
 import {
   PageWrapper,
   Card,
   Title,
   TitleDim,
   Subtitle,
+  Label,
+  Input,
   PrimaryButton,
   StatusText,
   ErrorText,
@@ -25,6 +28,27 @@ export interface ManagePageProps {
 }
 
 // ─── Manage-specific styled components ───────────────────────────
+
+const ModeToggle = styled.div`
+  display: flex;
+  gap: 0;
+  margin-bottom: 1.25rem;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border, #21262d);
+`;
+
+const ModeTab = styled.button<{ $active?: boolean }>`
+  flex: 1;
+  padding: 0.5rem;
+  border: none;
+  background: ${({ $active }) => ($active ? "var(--surface2)" : "transparent")};
+  color: ${({ $active }) => ($active ? "var(--fg)" : "var(--dim)")};
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s;
+  font-family: inherit;
+`;
 
 const ManageContainer = styled.div`
   width: 100%;
@@ -53,7 +77,7 @@ const ManageHeader = styled.div`
 
 const UserBadge = styled.span`
   font-size: 0.8rem;
-  color: #888;
+  color: var(--dim);
   background: var(--bg, #0d1117);
   border: 1px solid var(--border, #21262d);
   border-radius: 6px;
@@ -63,7 +87,7 @@ const UserBadge = styled.span`
 const SignOutButton = styled.button`
   border: 1px solid var(--border, #21262d);
   background: none;
-  color: #888;
+  color: var(--dim);
   padding: 0.3rem 0.8rem;
   border-radius: 6px;
   font-size: 0.78rem;
@@ -80,7 +104,7 @@ const SectionTitle = styled.div`
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: #666;
+  color: var(--dim);
   margin-bottom: 0.75rem;
 `;
 
@@ -96,7 +120,7 @@ const PasskeyChip = styled.span`
   border: 1px solid var(--border, #21262d);
   border-radius: 5px;
   padding: 0.2rem 0.6rem;
-  color: #888;
+  color: var(--dim);
   font-family: "SF Mono", "Fira Code", monospace;
 `;
 
@@ -109,7 +133,7 @@ const SyncedBadge = styled.span`
 const EmptyState = styled.div`
   text-align: center;
   padding: 2rem;
-  color: #666;
+  color: var(--dim);
   font-size: 0.9rem;
 `;
 
@@ -125,7 +149,7 @@ const VaultTable = styled.table`
 
 const Th = styled.th`
   text-align: left;
-  color: #666;
+  color: var(--dim);
   font-weight: 500;
   font-size: 0.75rem;
   text-transform: uppercase;
@@ -140,7 +164,7 @@ const Th = styled.th`
 
 const Td = styled.td<{ $actions?: boolean; $hideMobile?: boolean }>`
   padding: 0.6rem 0.5rem;
-  border-bottom: 1px solid #1a1a25;
+  border-bottom: 1px solid var(--border);
   vertical-align: middle;
   ${({ $actions }) => $actions && `white-space: nowrap; text-align: right;`}
   ${({ $hideMobile }) =>
@@ -157,7 +181,7 @@ const Tr = styled.tr`
     border-bottom: none;
   }
   &:hover td {
-    background: #1a1a25;
+    background: var(--surface);
   }
 `;
 
@@ -193,7 +217,7 @@ const RoomId = styled.span`
 `;
 
 const LabelText = styled.span`
-  color: #999;
+  color: var(--dim);
   font-size: 0.82rem;
 `;
 
@@ -208,12 +232,12 @@ const ActionBtn = styled.button<{ $variant?: string }>`
   font-family: inherit;
   ${({ $variant }) =>
     $variant === "revoke"
-      ? `color: var(--red, #f85149); &:hover { background: #2a1a1a; }`
+      ? `color: var(--red, #f85149); &:hover { background: var(--surface); }`
       : $variant === "default"
-        ? `color: var(--accent, #58a6ff); &:hover { background: #1a1a2a; }`
+        ? `color: var(--accent, #58a6ff); &:hover { background: var(--surface); }`
         : $variant === "dash"
-          ? `color: var(--purple, #bc8cff); &:hover { background: #1a1a2a; }`
-          : `color: #888; &:hover { background: #2a2a3a; }`}
+          ? `color: var(--purple, #bc8cff); &:hover { background: var(--surface); }`
+          : `color: var(--dim); &:hover { background: var(--surface2); }`}
 `;
 
 const DashLink = styled.a`
@@ -271,7 +295,7 @@ const Toast = styled.div<{ $show?: boolean }>`
   bottom: 1.5rem;
   left: 50%;
   transform: translateX(-50%);
-  background: #2a2a3a;
+  background: var(--surface2);
   color: var(--fg, #c9d1d9);
   padding: 0.5rem 1.25rem;
   border-radius: 8px;
@@ -320,8 +344,11 @@ interface RecoveryToken {
 
 // ─── Component ───────────────────────────────────────────────────
 
+type AuthMode = "signin" | "register";
+
 export function ManagePage({ origin }: ManagePageProps) {
   const [phase, setPhase] = useState<"auth" | "dashboard">("auth");
+  const [authMode, setAuthMode] = useState<AuthMode>("signin");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -361,8 +388,16 @@ export function ManagePage({ origin }: ManagePageProps) {
     return res.json();
   }
 
-  async function doSignIn() {
+  async function doAuth() {
     setError("");
+    if (authMode === "register") {
+      await doRegister();
+    } else {
+      await doSignIn();
+    }
+  }
+
+  async function doSignIn() {
     setStatus("Generating authentication options...");
     try {
       const { startAuthentication } = await import(
@@ -408,6 +443,63 @@ export function ManagePage({ origin }: ManagePageProps) {
       await loadDashboard(verData.sessionId);
     } catch (err: any) {
       setError(err.message || "Authentication failed");
+      setStatus("");
+    }
+  }
+
+  async function doRegister() {
+    const usernameInput = (
+      document.getElementById("manage-username") as HTMLInputElement
+    )?.value?.trim();
+    if (!usernameInput) {
+      setError("Username is required");
+      return;
+    }
+    setStatus("Generating registration options...");
+    try {
+      const { startRegistration } = await import(
+        "https://esm.sh/@simplewebauthn/browser@13"
+      );
+
+      const optRes = await fetch(`${origin}/webauthn/register/options`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: usernameInput }),
+      });
+      const optData = await optRes.json();
+      if (!optRes.ok) {
+        setError(optData.error || "Registration failed");
+        setStatus("");
+        return;
+      }
+
+      setStatus("Create your passkey...");
+      const regResp = await startRegistration({
+        optionsJSON: optData.options,
+      });
+
+      setStatus("Verifying...");
+      const verRes = await fetch(`${origin}/webauthn/register/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: optData.challengeId,
+          response: regResp,
+        }),
+      });
+      const verData = await verRes.json();
+      if (!verRes.ok || !verData.verified) {
+        setError(verData.error || "Registration failed");
+        setStatus("");
+        return;
+      }
+
+      setSessionId(verData.sessionId);
+      setPhase("dashboard");
+      setStatus("");
+      await loadDashboard(verData.sessionId);
+    } catch (err: any) {
+      setError(err.message || "Registration failed");
       setStatus("");
     }
   }
@@ -494,18 +586,51 @@ export function ManagePage({ origin }: ManagePageProps) {
   const dashBase = origin.replace(/mcp\./, "");
 
   return (
-    <PageWrapper>
-      <ManageContainer>
+    <>
+      <Nav active="manage" />
+      <PageWrapper>
+        <ManageContainer>
         {phase === "auth" && (
           <ManageCard>
             <Title>
-              sync<TitleDim>·mcp</TitleDim>
+              sync<TitleDim>·manage</TitleDim>
             </Title>
             <Subtitle>
-              Sign in with your passkey to manage your sync tokens and rooms.
+              Sign in or create an account to manage your sync rooms, tokens, and passkeys.
             </Subtitle>
-            <PrimaryButton onClick={doSignIn}>
-              Sign in with passkey
+
+            <ModeToggle>
+              <ModeTab
+                $active={authMode === "signin"}
+                onClick={() => { setAuthMode("signin"); setError(""); setStatus(""); }}
+              >
+                Sign in
+              </ModeTab>
+              <ModeTab
+                $active={authMode === "register"}
+                onClick={() => { setAuthMode("register"); setError(""); setStatus(""); }}
+              >
+                Register
+              </ModeTab>
+            </ModeToggle>
+
+            {authMode === "register" && (
+              <div>
+                <Label htmlFor="manage-username">Username</Label>
+                <Input
+                  id="manage-username"
+                  type="text"
+                  placeholder="Choose a username"
+                  autoComplete="username"
+                  onKeyDown={(e) => e.key === "Enter" && doAuth()}
+                />
+              </div>
+            )}
+
+            <PrimaryButton onClick={doAuth}>
+              {authMode === "register"
+                ? "Create account with passkey"
+                : "Sign in with passkey"}
             </PrimaryButton>
             {status && <StatusText>{status}</StatusText>}
             {error && <ErrorText>{error}</ErrorText>}
@@ -685,6 +810,7 @@ export function ManagePage({ origin }: ManagePageProps) {
 
         <Toast $show={toastVisible}>{toastMsg}</Toast>
       </ManageContainer>
-    </PageWrapper>
+      </PageWrapper>
+    </>
   );
 }

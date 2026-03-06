@@ -1,6 +1,8 @@
-# agent-sync v5 Examples
+# sync v6 Examples
 
 All writes use `POST /actions/:id/invoke`. All reads use `GET /context`.
+There is no `_set_state` — agents register actions with write templates, then invoke them.
+The standard library (`help({ key: "standard_library" })`) provides common patterns.
 
 ## 1. Basic Setup: Room + Agents + Chat
 
@@ -11,14 +13,26 @@ curl -X POST https://sync.parc.land/rooms \
   -d '{"id": "demo"}'
 # → { "id": "demo", "token": "room_abc123..." }
 
-# Set up initial state (room token, via built-in action)
-curl -X POST https://sync.parc.land/rooms/demo/actions/_batch_set_state/invoke \
+# Bootstrap: read standard library, register a "set" action
+curl -X POST https://sync.parc.land/rooms/demo/actions/help/invoke \
   -H "Authorization: Bearer room_abc123..." \
   -H "Content-Type: application/json" \
-  -d '{"params": {"writes": [
-    {"scope": "_shared", "key": "phase", "value": "lobby"},
-    {"scope": "_shared", "key": "max_players", "value": 4}
-  ]}}'
+  -d '{"params": {"key": "standard_library"}}'
+# → returns ready-to-register action definitions
+
+# Register the "set" action from standard library
+curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
+  -H "Authorization: Bearer room_abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{"params": {"id": "set", "description": "Write a named value to shared state",
+       "params": {"key": {"type": "string"}, "value": {"type": "any"}},
+       "writes": [{"scope": "_shared", "key": "${params.key}", "value": "${params.value}"}]}}'
+
+# Set up initial state via the registered action
+curl -X POST https://sync.parc.land/rooms/demo/actions/set/invoke \
+  -H "Authorization: Bearer room_abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{"params": {"key": "phase", "value": "lobby"}}'
 
 # Join as Alice with private state and public health view
 curl -X POST https://sync.parc.land/rooms/demo/agents \
@@ -93,27 +107,7 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/claim_task/invoke \
 ## 3. Array Push (Append with Key)
 
 ```bash
-# Append to an array at a specific key (array-push semantics)
-# First push creates the array
-curl -X POST https://sync.parc.land/rooms/demo/actions/_set_state/invoke \
-  -H "Authorization: Bearer room_abc123..." \
-  -d '{"params": {"scope": "_shared", "key": "proposals", "value": {"id": "p1", "title": "First"}, "append": true}}'
-# → { "value": [{"id": "p1", "title": "First"}] }
-
-# Second push appends to existing array
-curl -X POST https://sync.parc.land/rooms/demo/actions/_set_state/invoke \
-  -H "Authorization: Bearer room_abc123..." \
-  -d '{"params": {"scope": "_shared", "key": "proposals", "value": {"id": "p2", "title": "Second"}, "append": true}}'
-# → { "value": [{"id": "p1", "title": "First"}, {"id": "p2", "title": "Second"}] }
-
-# Works in batch too
-curl -X POST https://sync.parc.land/rooms/demo/actions/_batch_set_state/invoke \
-  -H "Authorization: Bearer room_abc123..." \
-  -d '{"params": {"writes": [
-    {"scope": "_shared", "key": "proposals", "value": {"id": "p3", "title": "Third"}, "append": true}
-  ]}}'
-
-# Also works in custom action write templates
+# Register a "submit_proposal" action with array-push write template
 curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
   -H "Authorization: Bearer room_abc123..." \
   -d '{"params": {
@@ -123,22 +117,33 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
     "writes": [{"scope": "_shared", "key": "proposals", "value": {"by": "${self}", "title": "${params.title}"}, "append": true}]
   }}'
 
+# Invoke — first push creates the array
+curl -X POST https://sync.parc.land/rooms/demo/actions/submit_proposal/invoke \
+  -H "Authorization: Bearer as_alice123..." \
+  -d '{"params": {"title": "First"}}'
+# → { "writes": [{ "value": [{"by": "alice", "title": "First"}] }] }
+
+# Second push appends to existing array
+curl -X POST https://sync.parc.land/rooms/demo/actions/submit_proposal/invoke \
+  -H "Authorization: Bearer as_bob456..." \
+  -d '{"params": {"title": "Second"}}'
+# → { "writes": [{ "value": [{"by": "alice", "title": "First"}, {"by": "bob", "title": "Second"}] }] }
+
 # Note: append WITHOUT key still does log-structured rows with auto sort_key (unchanged)
 ```
 
 ## 4. Private State + Views
 
 ```bash
-# Alice writes to her private scope (built-in action)
-curl -X POST https://sync.parc.land/rooms/demo/actions/_set_state/invoke \
-  -H "Authorization: Bearer as_alice123..." \
-  -d '{"params": {"key": "health", "value": 100}}'
+# Alice joins with inline private state and public view
+curl -X POST https://sync.parc.land/rooms/demo/agents \
+  -H "Content-Type: application/json" \
+  -d '{"id": "alice", "name": "Alice", "role": "player",
+       "state": {"health": 100, "secret_plan": "attack from the north"},
+       "public_keys": ["health"]}'
+# → auto-creates view "alice.health" visible to all
 
-curl -X POST https://sync.parc.land/rooms/demo/actions/_set_state/invoke \
-  -H "Authorization: Bearer as_alice123..." \
-  -d '{"params": {"key": "secret_plan", "value": "attack from the north"}}'
-
-# Alice registers a view that projects her health publicly (built-in action)
+# Alice registers a computed view that projects her health as a status
 curl -X POST https://sync.parc.land/rooms/demo/actions/_register_view/invoke \
   -H "Authorization: Bearer as_alice123..." \
   -d '{"params": {
@@ -147,11 +152,15 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_view/invoke \
     "description": "Alice public health status"
   }}'
 
-# Or simpler: just make health public via auto-view
-curl -X POST https://sync.parc.land/rooms/demo/actions/_set_state/invoke \
+# Alice registers an action to update her own health
+curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
   -H "Authorization: Bearer as_alice123..." \
-  -d '{"params": {"key": "health", "value": 100, "public": true}}'
-# → auto-creates view "alice.health" visible to all
+  -d '{"params": {
+    "id": "alice_set_health",
+    "description": "Update Alice health",
+    "params": {"value": {"type": "number"}},
+    "writes": [{"scope": "alice", "key": "health", "value": "${params.value}"}]
+  }}'
 
 # Bob reads context — sees views but NOT Alice's raw state
 curl https://sync.parc.land/rooms/demo/context \
@@ -203,10 +212,19 @@ curl -X PATCH https://sync.parc.land/rooms/demo/agents/bob \
   -H "Authorization: Bearer room_abc123..." \
   -d '{"grants": ["_shared"], "role": "admin"}'
 
-# Now Bob can write to _shared via _set_state
-curl -X POST https://sync.parc.land/rooms/demo/actions/_set_state/invoke \
+# Now Bob can register actions that write to _shared
+curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
   -H "Authorization: Bearer as_bob456..." \
-  -d '{"params": {"scope": "_shared", "key": "phase", "value": "endgame"}}'
+  -d '{"params": {
+    "id": "set_phase",
+    "description": "Set the game phase",
+    "params": {"phase": {"type": "string"}},
+    "writes": [{"scope": "_shared", "key": "phase", "value": "${params.phase}"}]
+  }}'
+
+curl -X POST https://sync.parc.land/rooms/demo/actions/set_phase/invoke \
+  -H "Authorization: Bearer as_bob456..." \
+  -d '{"params": {"phase": "endgame"}}'
 ```
 
 ## 7. Computed Views with Aggregation
@@ -259,17 +277,29 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
 #   - "delete" is the opposite: visible now, disappears when timer fires
 ```
 
-## 9. Conditional State (Enabled Expressions)
+## 9. Conditional Visibility (Enabled Expressions)
 
 ```bash
-# State that only appears during endgame (room token)
-curl -X POST https://sync.parc.land/rooms/demo/actions/_set_state/invoke \
+# Register an action whose writes include an enabled expression
+curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
   -H "Authorization: Bearer room_abc123..." \
   -d '{"params": {
-    "scope": "_shared",
-    "key": "final_boss_location",
-    "value": {"x": 100, "y": 200},
-    "enabled": "state._shared.phase == \"endgame\""
+    "id": "reveal_boss",
+    "description": "Set the final boss location (visible only during endgame)",
+    "params": {"x": {"type": "number"}, "y": {"type": "number"}},
+    "writes": [{"scope": "_shared", "key": "final_boss_location",
+                "value": {"x": "${params.x}", "y": "${params.y}"},
+                "enabled": "state._shared.phase == \"endgame\""}]
+  }}'
+
+# Register a view with enabled expression
+curl -X POST https://sync.parc.land/rooms/demo/actions/_register_view/invoke \
+  -H "Authorization: Bearer room_abc123..." \
+  -d '{"params": {
+    "id": "boss-radar",
+    "expr": "state._shared.final_boss_location",
+    "enabled": "state._shared.phase == \"endgame\"",
+    "render": {"type": "metric", "label": "Boss Location"}
   }}'
 ```
 
@@ -332,10 +362,10 @@ while True:
                 headers=HEADERS
             )
 
-    # Update own state
+    # Update own status (via standard library "update_status" action, registered at startup)
     httpx.post(
-        f"{BASE}/rooms/{ROOM}/actions/_set_state/invoke",
-        json={"params": {"key": "status", "value": "working", "public": true}},
+        f"{BASE}/rooms/{ROOM}/actions/update_status/invoke",
+        json={"params": {"status": "working"}},
         headers=HEADERS
     )
 ```

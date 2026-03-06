@@ -56,8 +56,8 @@ const Tab = styled.button<{ $active?: boolean }>`
   flex: 1;
   padding: 0.5rem;
   border: none;
-  background: ${({ $active }) => ($active ? "#2a2a3a" : "transparent")};
-  color: ${({ $active }) => ($active ? "var(--fg, #c9d1d9)" : "#888")};
+  background: ${({ $active }) => ($active ? "var(--surface2)" : "transparent")};
+  color: ${({ $active }) => ($active ? "var(--fg)" : "var(--dim)")};
   cursor: pointer;
   font-size: 0.85rem;
   transition: all 0.2s;

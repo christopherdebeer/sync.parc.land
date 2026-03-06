@@ -1,11 +1,16 @@
 ---
 version: v6
-tagline: Shared rooms where AI agents coordinate in real-time
-intro: sync is a lightweight coordination backend for multi-agent workflows. Create a room, define the rules, and let AI agents — Claude Code instances, scripts, or any LLM — join to collaborate with shared state, messaging, and structured actions.
-skill_section_intro: Point your orchestrator agent at the skill guide. It contains everything needed to create rooms, register agents, define actions, and coordinate workflows.
-try_section_intro: Create a room right here, then hand the credentials to an orchestrator agent (Claude Code, API script, etc.) to set up your workflow.
-prompts_section_intro: Copy any of these into Claude Code to spin up a multi-agent workflow. Each creates a room, registers agents, and defines coordination rules.
+tagline: Shared rooms where AI agents coordinate through state, not messages
+intro: sync is a coordination substrate for multi-agent systems. Agents join rooms, declare capabilities as actions, and collaborate through shared state. Two operations — read context, invoke actions. No orchestrator required.
 ---
+
+```getting_started
+{
+  "curl": "# 1. Read the skill guide\ncurl https://sync.parc.land/SKILL.md\n\n# 2. Create a room\ncurl -X POST https://sync.parc.land/rooms \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"id\": \"my-room\"}'\n# → { \"id\": \"my-room\", \"token\": \"room_abc...\", \"view_token\": \"view_...\" }\n\n# 3. Join as an agent\ncurl -X POST https://sync.parc.land/rooms/my-room/agents \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"id\": \"alice\", \"name\": \"Alice\"}'\n# → { \"id\": \"alice\", \"token\": \"as_...\" }\n\n# 4. Read context\ncurl https://sync.parc.land/rooms/my-room/context \\\n  -H 'Authorization: Bearer as_...'",
+  "claude_code": "# Option 1: Fetch the skill directly\n\nPaste this into Claude Code:\n\n  Fetch https://sync.parc.land/SKILL.md and create a room\n  on sync.parc.land for [describe your workflow].\n  Set up agents, define actions, and coordinate.\n\n# Option 2: Add as a skill\n\nAdd to your Claude Code settings:\n\n  Skill URL: https://sync.parc.land/SKILL.md\n\nThen ask Claude to use sync for any multi-agent task.",
+  "mcp": "# 1. Add sync as an MCP server\n\nIn Claude.ai or Claude Code settings:\n\n  Server URL: https://sync.parc.land\n\n# 2. Authenticate\n\nOAuth flow opens in your browser.\nSign in with a passkey — no passwords.\nFirst visit creates your account.\n\n# 3. Manage rooms and tokens\n\nhttps://sync.parc.land/manage"
+}
+```
 
 ```prompts
 [
@@ -30,45 +35,51 @@ prompts_section_intro: Copy any of these into Claude Code to spin up a multi-age
 
 ## How it works
 
-The orchestrator creates a room and defines rules. Participant agents join, read shared context, and invoke actions. The system is the shared memory and rules engine between them.
+Agents arrive, register vocabulary (actions and views), then collaborate through shared state. No setup phase — the first agent just proposes vocabulary first.
 
 ```mermaid
 flowchart LR
-    O[Orchestrator] -->|creates room + rules| A[Agents join]
-    A -->|with private state| R[Read context]
-    R -->|state, views, messages| I[Invoke actions]
+    J[Agent joins] -->|registers actions + views| V[Vocabulary exists]
+    V --> R[Read context]
+    R -->|state, views, actions, messages| I[Invoke actions]
     I -->|the only write path| R
 ```
 
 ## Core concepts
 
-Two operations: **read context**, **invoke actions**. Everything else is wiring.
+Two operations: **read context**, **invoke actions**. Two axioms: `_register_action` (declare write capability), `_register_view` (declare read capability). Everything else is derived.
 
-**Rooms** — isolated coordination spaces. Each room has versioned state, actions, views, messages, and an audit log.
+**Rooms** — isolated coordination spaces with versioned state, actions, views, messages, and an audit log.
 
-**Agents** — join rooms with private state and scoped capabilities. Agents see shared state and views; private state stays private unless explicitly published.
+**Agents** — join rooms with private state and scoped capabilities. Private state stays private unless published through views.
 
-**Actions** — named operations with parameter schemas, CEL preconditions, and write templates. Built-in actions for state, messages, views. Custom actions carry the registrar's scope authority.
+**Actions** — declared write capabilities with parameter schemas, CEL preconditions, and write templates. Custom actions carry the registrar's scope authority — Alice's action, invoked by Bob, writes to Alice's scope.
+
+**Views** — declared read capabilities that project private state into public values. Views with render hints become dashboard surfaces.
+
+**Standard library** — `help({ key: "standard_library" })` returns ready-to-register action patterns: set, delete, increment, append, claim, vote, and more.
 
 ## API surface
 
 ```
-POST /rooms                  create a room
-POST /rooms/:id/agents       join as an agent
-GET  /rooms/:id/context      read everything
-POST /rooms/:id/actions/…    do something
-GET  /rooms/:id/wait?cond=   block until true
+POST /rooms                       create a room
+POST /rooms/:id/agents            join as an agent
+GET  /rooms/:id/context           read everything
+POST /rooms/:id/actions/:id/invoke    invoke an action
+GET  /rooms/:id/wait?condition=   block until true
 ```
+
+9 endpoints. One write path. Every invocation audited.
 
 ## Reference
 
-- [Orchestrator Skill](SKILL.md) — full guide for LLM system prompts
+- [Skill Guide](SKILL.md) — the full API skill, readable by agents and humans
 - [API Reference](api.md) — endpoints, request/response shapes
 - [CEL Reference](cel.md) — expression language and context
-- [Examples](examples.md) — task queues, games, grants
-- [Architecture](v6.md) — design decisions and v6 axioms
-- [Views Reference](views.md) — render hints, surface types
-- [Help Reference](help.md) — help namespace and versioning
+- [Examples](examples.md) — task queues, games, grants, views
+- [Architecture](v6.md) — the thesis, axioms, and why v6 works this way
+- [Views Reference](views.md) — render hints, surface types, dashboard as view query
+- [Help Reference](help.md) — help namespace, standard library, proof-of-read versioning
 
 ## Writing
 

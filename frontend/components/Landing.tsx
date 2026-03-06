@@ -2,20 +2,21 @@
 import { useCallback, useEffect, useState } from "https://esm.sh/react@18.2.0";
 import { keyframes, styled } from "../styled.ts";
 import { processMermaidBlocks, runMermaid } from "../mermaid.ts";
+import { Nav } from "./Nav.tsx";
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 
 const Page = styled.div`
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  background: var(--lbg);
-  color: var(--lfg);
+  background: var(--bg);
+  color: var(--fg);
   line-height: 1.6;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   a {
-    color: var(--laccent);
+    color: var(--accent);
     text-decoration: none;
   }
   a:hover {
@@ -47,7 +48,7 @@ const H1 = styled.h1`
 `;
 
 const Subtitle = styled.p`
-  color: var(--ldim);
+  color: var(--dim);
   font-size: 1.15rem;
   margin-bottom: 1.5rem;
   line-height: 1.5;
@@ -61,7 +62,7 @@ const Subtitle = styled.p`
 const Intro = styled.p`
   font-size: 1.02rem;
   margin-bottom: 2.5rem;
-  color: var(--lfg);
+  color: var(--fg);
   line-height: 1.65;
   @media (max-width: 480px) {
     font-size: 0.95rem;
@@ -86,42 +87,68 @@ const H2 = styled.h2`
 `;
 
 const SectionIntro = styled.p`
-  color: var(--ldim);
+  color: var(--dim);
   font-size: 0.95rem;
   margin-bottom: 1rem;
   line-height: 1.55;
 `;
 
-// ── Skill URL block ─────────────────────────────────────────────────────────
+// ── Tabs ────────────────────────────────────────────────────────────────────
 
-const SkillBlock = styled.div`
-  background: var(--lsurface);
-  border: 1px solid var(--lborder);
-  border-radius: 8px;
-  padding: 0.9rem 1.1rem;
+const TabBar = styled.div`
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
-  font-size: 0.88rem;
-  color: var(--laccent);
-  word-break: break-all;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0;
+`;
+
+const Tab = styled.button<{ $active: boolean }>`
+  background: ${({ $active }) => ($active ? "var(--surface)" : "transparent")};
+  border: 1px solid ${({ $active }) => ($active ? "var(--border)" : "transparent")};
+  border-bottom: ${({ $active }) => ($active ? "1px solid var(--surface)" : "1px solid var(--border)")};
+  border-radius: 6px 6px 0 0;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: ${({ $active }) => ($active ? "600" : "400")};
+  color: ${({ $active }) => ($active ? "var(--accent)" : "var(--dim)")};
+  transition: color 0.15s;
+  margin-bottom: -1px;
+  &:hover {
+    color: var(--fg);
+  }
   @media (max-width: 480px) {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 0.6rem;
-    font-size: 0.82rem;
-    padding: 0.75rem 0.9rem;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.8rem;
   }
 `;
 
+const TabContent = styled.div`
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  padding: 1.1rem 1.25rem;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  font-size: 0.82rem;
+  line-height: 1.65;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  @media (max-width: 480px) {
+    padding: 0.85rem 0.9rem;
+    font-size: 0.76rem;
+  }
+`;
+
+// ── Copy button ─────────────────────────────────────────────────────────────
+
 const CopyBtn = styled.button`
   background: transparent;
-  border: 1px solid var(--lborder);
+  border: 1px solid var(--border);
   border-radius: 5px;
-  color: var(--ldim);
+  color: var(--dim);
   font-size: 0.78rem;
   padding: 0.3rem 0.6rem;
   cursor: pointer;
@@ -129,8 +156,8 @@ const CopyBtn = styled.button`
   font-family: inherit;
   transition: all 0.15s;
   &:hover {
-    color: var(--lfg);
-    border-color: var(--ldim);
+    color: var(--fg);
+    border-color: var(--dim);
   }
   @media (max-width: 480px) {
     align-self: flex-end;
@@ -141,15 +168,15 @@ const CopyBtn = styled.button`
 // ── Prompt cards ────────────────────────────────────────────────────────────
 
 const PromptCard = styled.div`
-  background: var(--lsurface);
-  border: 1px solid var(--lborder);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1rem 1.25rem;
   margin-bottom: 0.75rem;
   cursor: pointer;
   transition: border-color 0.15s;
   &:hover {
-    border-color: var(--laccent);
+    border-color: var(--accent);
   }
   @media (max-width: 480px) {
     padding: 0.85rem 1rem;
@@ -159,7 +186,7 @@ const PromptCard = styled.div`
 const PromptLabel = styled.div`
   font-size: 0.82rem;
   font-weight: 600;
-  color: var(--laccent);
+  color: var(--accent);
   margin-bottom: 0.35rem;
   display: flex;
   align-items: center;
@@ -169,7 +196,7 @@ const PromptLabel = styled.div`
 
 const PromptText = styled.div`
   font-size: 0.9rem;
-  color: var(--lfg);
+  color: var(--fg);
   line-height: 1.5;
   @media (max-width: 480px) {
     font-size: 0.85rem;
@@ -179,7 +206,7 @@ const PromptText = styled.div`
 
 const CopiedTag = styled.span`
   font-size: 0.72rem;
-  color: var(--ldim);
+  color: var(--dim);
   font-weight: 400;
   white-space: nowrap;
 `;
@@ -189,7 +216,7 @@ const CopiedTag = styled.span`
 const Prose = styled.div`
   line-height: 1.7;
   font-size: 0.95rem;
-  color: var(--lfg);
+  color: var(--fg);
 
   h2 {
     font-size: 1.15rem;
@@ -208,7 +235,7 @@ const Prose = styled.div`
   }
 
   a {
-    color: var(--laccent);
+    color: var(--accent);
     text-decoration: none;
   }
   a:hover {
@@ -216,7 +243,7 @@ const Prose = styled.div`
   }
 
   strong {
-    color: var(--lfg);
+    color: var(--fg);
     font-weight: 600;
   }
 
@@ -229,8 +256,8 @@ const Prose = styled.div`
   }
 
   pre {
-    background: var(--lsurface);
-    border: 1px solid var(--lborder);
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 1rem 1.25rem;
     overflow-x: auto;
@@ -242,23 +269,23 @@ const Prose = styled.div`
       background: none;
       border: none;
       padding: 0;
-      color: var(--lfg);
+      color: var(--fg);
       font-size: inherit;
     }
   }
 
   code {
-    background: var(--lsurface);
-    border: 1px solid var(--lborder);
+    background: var(--surface);
+    border: 1px solid var(--border);
     padding: 0.15em 0.4em;
     border-radius: 4px;
     font-size: 0.88em;
-    color: var(--laccent);
+    color: var(--accent);
   }
 
   hr {
     border: none;
-    border-top: 1px solid var(--lborder);
+    border-top: 1px solid var(--border);
     margin: 2rem 0;
   }
 
@@ -281,26 +308,19 @@ const Prose = styled.div`
   }
 `;
 
-const DashHint = styled.p`
-  margin-top: 2rem;
-  color: var(--ldim);
-  font-size: 0.88rem;
-  word-break: break-all;
-`;
-
 const Footer = styled.footer`
   text-align: center;
   padding: 2rem;
-  color: var(--ldim);
+  color: var(--dim);
   font-size: 0.8rem;
-  border-top: 1px solid var(--lborder);
+  border-top: 1px solid var(--border);
 `;
 
 // ── Create Room ─────────────────────────────────────────────────────────────
 
 const CreateBox = styled.div`
-  background: var(--lsurface);
-  border: 1px solid var(--lborder);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1.1rem 1.25rem;
   margin-top: 0.75rem;
@@ -318,25 +338,25 @@ const CreateRow = styled.div`
 
 const RoomInput = styled.input`
   flex: 1;
-  background: var(--lbg);
-  border: 1px solid var(--lborder);
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0.55rem 0.8rem;
-  color: var(--lfg);
+  color: var(--fg);
   font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
   font-size: 0.85rem;
   outline: none;
   &:focus {
-    border-color: var(--laccent);
+    border-color: var(--accent);
   }
   &::placeholder {
-    color: var(--ldim);
+    color: var(--dim);
     opacity: 0.6;
   }
 `;
 
 const CreateBtn = styled.button`
-  background: var(--laccent);
+  background: var(--accent);
   color: #fff;
   border: none;
   border-radius: 6px;
@@ -365,14 +385,14 @@ const CreateError = styled.div`
 const ResultBox = styled.div`
   margin-top: 1rem;
   padding: 1rem 1.1rem;
-  background: var(--lbg);
-  border: 1px solid var(--lborder);
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: 6px;
 `;
 
 const ResultLabel = styled.div`
   font-size: 0.75rem;
-  color: var(--ldim);
+  color: var(--dim);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-bottom: 0.3rem;
@@ -385,7 +405,7 @@ const ResultLabel = styled.div`
 const ResultValue = styled.div`
   font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
   font-size: 0.82rem;
-  color: var(--laccent);
+  color: var(--accent);
   word-break: break-all;
   display: flex;
   align-items: center;
@@ -399,7 +419,7 @@ const ResultValue = styled.div`
 `;
 
 const ResultLink = styled.a`
-  color: var(--laccent);
+  color: var(--accent);
   font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
   font-size: 0.82rem;
   word-break: break-all;
@@ -408,22 +428,22 @@ const ResultLink = styled.a`
 const PromptBlock = styled.div`
   margin-top: 0.75rem;
   padding: 0.85rem 1rem;
-  background: var(--lsurface);
-  border: 1px solid var(--lborder);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 0.85rem;
   line-height: 1.55;
-  color: var(--lfg);
+  color: var(--fg);
   cursor: pointer;
   transition: border-color 0.15s;
   &:hover {
-    border-color: var(--laccent);
+    border-color: var(--accent);
   }
 `;
 
 const PromptBlockLabel = styled.div`
   font-size: 0.72rem;
-  color: var(--ldim);
+  color: var(--dim);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-bottom: 0.4rem;
@@ -439,36 +459,43 @@ const Lockup = styled.div`
   margin-bottom: 2em;
 `;
 
+const ManageLink = styled.p`
+  margin-top: 0.75rem;
+  color: var(--dim);
+  font-size: 0.88rem;
+  a {
+    color: var(--accent);
+  }
+`;
+
 // ── Data ────────────────────────────────────────────────────────────────────
 
 const SKILL_URL = "https://sync.parc.land/SKILL.md";
 const BASE = globalThis.location?.origin || "https://sync.parc.land";
 
+const TAB_KEYS = ["curl", "claude_code", "mcp"] as const;
+const TAB_LABELS: Record<string, string> = {
+  curl: "curl / REST",
+  claude_code: "Claude Code",
+  mcp: "MCP",
+};
+
 interface LandingData {
   version: string;
   tagline: string;
   intro: string;
-  skill_section_intro: string;
-  try_section_intro: string;
-  prompts_section_intro: string;
   prompts: { label: string; text: string }[];
-  howItWorksHtml: string; // body up to and including ## How it works
-  restHtml: string; // body after ## How it works section
+  gettingStarted: Record<string, string>;
+  bodyHtml: string;
 }
 
 const DEFAULT_DATA: LandingData = {
   version: "v6",
-  tagline: "Shared rooms where AI agents coordinate in real-time",
-  intro:
-    "sync is a lightweight coordination backend for multi-agent workflows.",
-  skill_section_intro: "Point your orchestrator agent at the skill guide.",
-  try_section_intro:
-    "Create a room right here, then hand the credentials to an orchestrator agent.",
-  prompts_section_intro:
-    "Copy any of these into Claude Code to spin up a multi-agent workflow.",
+  tagline: "Shared rooms where AI agents coordinate through state, not messages",
+  intro: "sync is a coordination substrate for multi-agent systems.",
   prompts: [],
-  howItWorksHtml: "",
-  restHtml: "",
+  gettingStarted: {},
+  bodyHtml: "",
 };
 
 declare const marked: { parse: (md: string, opts?: any) => string };
@@ -481,7 +508,7 @@ function rewriteDocLinks(html: string): string {
   );
 }
 
-/** Parse ---frontmatter--- + ```prompts``` block + body from landing.md */
+/** Parse ---frontmatter--- + ```getting_started``` + ```prompts``` + body from landing.md */
 function parseLandingMd(raw: string): LandingData {
   const data = { ...DEFAULT_DATA };
 
@@ -499,6 +526,17 @@ function parseLandingMd(raw: string): LandingData {
     }
   }
 
+  // Extract ```getting_started JSON block
+  const gsMatch = raw.match(/```getting_started\r?\n([\s\S]*?)```/);
+  if (gsMatch) {
+    try {
+      const parsed = JSON.parse(gsMatch[1].trim());
+      if (typeof parsed === "object" && parsed !== null) {
+        data.gettingStarted = parsed;
+      }
+    } catch {}
+  }
+
   // Extract ```prompts JSON block
   const promptsMatch = raw.match(/```prompts\r?\n([\s\S]*?)```/);
   if (promptsMatch) {
@@ -513,38 +551,16 @@ function parseLandingMd(raw: string): LandingData {
     } catch {}
   }
 
-  // Extract body — strip frontmatter and prompts block, render remainder
+  // Extract body — strip frontmatter and fenced blocks, render remainder
   try {
     let body = raw;
-    // Strip frontmatter
     body = body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
-    // Strip prompts block
+    body = body.replace(/```getting_started\r?\n[\s\S]*?```\r?\n?/, "");
     body = body.replace(/```prompts\r?\n[\s\S]*?```\r?\n?/, "");
     body = body.trim();
 
-    // Split at "## How it works" — everything up to (and including) that
-    // section goes before the flow diagram widget; everything after goes after
-    const splitMarker = /^## How it works/m;
-    const splitIdx = body.search(splitMarker);
-    if (splitIdx !== -1) {
-      // Find end of "How it works" section = next ## heading
-      const afterMarker = body.slice(splitIdx + "## How it works".length);
-      const nextH2 = afterMarker.search(/^## /m);
-      const endOfSection = nextH2 !== -1
-        ? splitIdx + "## How it works".length + nextH2
-        : body.length;
-
-      const howItWorksMd = body.slice(splitIdx, endOfSection);
-      const restMd = body.slice(endOfSection).trim();
-
-      data.howItWorksHtml = rewriteDocLinks(
-        processMermaidBlocks(marked.parse(howItWorksMd, { gfm: true })),
-      );
-      data.restHtml = rewriteDocLinks(
-        processMermaidBlocks(marked.parse(restMd, { gfm: true })),
-      );
-    } else {
-      data.restHtml = rewriteDocLinks(
+    if (body) {
+      data.bodyHtml = rewriteDocLinks(
         processMermaidBlocks(marked.parse(body, { gfm: true })),
       );
     }
@@ -572,16 +588,16 @@ interface CreatedRoom {
 
 export function Landing() {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
-  const [copiedSkill, setCopiedSkill] = useState(false);
   const [landingData, setLandingData] = useState<LandingData>(DEFAULT_DATA);
+  const [activeTab, setActiveTab] = useState<string>("curl");
 
   useEffect(() => {
     fetchLandingData().then(setLandingData);
   }, []);
 
   useEffect(() => {
-    if (landingData.howItWorksHtml || landingData.restHtml) runMermaid();
-  }, [landingData.howItWorksHtml, landingData.restHtml]);
+    if (landingData.bodyHtml) runMermaid();
+  }, [landingData.bodyHtml]);
 
   const PROMPTS = landingData.prompts;
 
@@ -597,9 +613,6 @@ export function Landing() {
       if (idx !== undefined) {
         setCopiedIdx(idx);
         setTimeout(() => setCopiedIdx(null), 1500);
-      } else {
-        setCopiedSkill(true);
-        setTimeout(() => setCopiedSkill(false), 1500);
       }
     }).catch(() => {});
   }, []);
@@ -650,8 +663,9 @@ export function Landing() {
 
   return (
     <Page>
+      <Nav active="home" />
       <Container>
-        {/* ── Hero ── */}
+        {/* ── 1. Hero ── */}
         <Lockup>
           <img src={"/static/favicon.svg"} style={{ height: "7em" }} />
           <div>
@@ -661,22 +675,44 @@ export function Landing() {
         </Lockup>
         <Intro>{landingData.intro}</Intro>
 
-        {/* ── Getting Started ── */}
+        {/* ── 2. Getting Started (tabs) ── */}
         <Section>
-          <H2>Get started with Claude Code</H2>
-          <SectionIntro>{landingData.skill_section_intro}</SectionIntro>
-          <SkillBlock>
-            <span>{SKILL_URL}</span>
-            <CopyBtn onClick={() => copyText(SKILL_URL)}>
-              {copiedSkill ? "copied" : "copy"}
-            </CopyBtn>
-          </SkillBlock>
+          <H2>Getting started</H2>
+          {Object.keys(landingData.gettingStarted).length > 0 && (
+            <>
+              <TabBar>
+                {TAB_KEYS.map((k) =>
+                  landingData.gettingStarted[k] ? (
+                    <Tab
+                      key={k}
+                      $active={activeTab === k}
+                      onClick={() => setActiveTab(k)}
+                    >
+                      {TAB_LABELS[k] || k}
+                    </Tab>
+                  ) : null,
+                )}
+              </TabBar>
+              <TabContent>
+                {landingData.gettingStarted[activeTab] || ""}
+              </TabContent>
+            </>
+          )}
         </Section>
 
-        {/* ── Try It ── */}
+        {/* ── 3. Body prose (How it works, Core concepts, API, Reference, Writing) ── */}
+        {landingData.bodyHtml && (
+          <Prose
+            dangerouslySetInnerHTML={{ __html: landingData.bodyHtml }}
+          />
+        )}
+
+        {/* ── 4. Try it — create a room ── */}
         <Section>
           <H2>Try it — create a room</H2>
-          <SectionIntro>{landingData.try_section_intro}</SectionIntro>
+          <SectionIntro>
+            Create a room right here, then hand the credentials to an agent.
+          </SectionIntro>
           <CreateBox>
             {!created
               ? (
@@ -693,7 +729,7 @@ export function Landing() {
                       autoComplete="off"
                     />
                     <CreateBtn onClick={createRoom} disabled={creating}>
-                      {creating ? "creating…" : "Create room"}
+                      {creating ? "creating\u2026" : "Create room"}
                     </CreateBtn>
                   </CreateRow>
                   {createError && <CreateError>{createError}</CreateError>}
@@ -728,7 +764,7 @@ export function Landing() {
                     <PromptBlockLabel>
                       Orchestrator prompt — paste into Claude Code
                       <CopiedTag>
-                        {copiedField === "prompt" ? "copied ✓" : "tap to copy"}
+                        {copiedField === "prompt" ? "copied" : "tap to copy"}
                       </CopiedTag>
                     </PromptBlockLabel>
                     <span style={{ whiteSpace: "pre-wrap" }}>
@@ -749,40 +785,34 @@ export function Landing() {
                 </ResultBox>
               )}
           </CreateBox>
+          <ManageLink>
+            For MCP setup, passkeys, and token management: <a href="/manage">/manage</a>
+          </ManageLink>
         </Section>
 
-        {/* ── Example Prompts ── */}
-        <Section>
-          <H2>Example prompts</H2>
-          <SectionIntro>{landingData.prompts_section_intro}</SectionIntro>
-          {PROMPTS.map((p, i) => (
-            <PromptCard
-              key={i}
-              onClick={() => copyText(p.text, i)}
-            >
-              <PromptLabel>
-                {p.label}
-                <CopiedTag>
-                  {copiedIdx === i ? "copied ✓" : "tap to copy"}
-                </CopiedTag>
-              </PromptLabel>
-              <PromptText>{p.text}</PromptText>
-            </PromptCard>
-          ))}
-        </Section>
-
-        {/* ── How It Works + rest of body ── */}
-        {(landingData.howItWorksHtml || landingData.restHtml) && (
-          <Prose
-            dangerouslySetInnerHTML={{
-              __html: landingData.howItWorksHtml + landingData.restHtml,
-            }}
-          />
+        {/* ── 5. Example prompts ── */}
+        {PROMPTS.length > 0 && (
+          <Section>
+            <H2>Example prompts</H2>
+            <SectionIntro>
+              Copy any of these into Claude Code to spin up a multi-agent workflow.
+            </SectionIntro>
+            {PROMPTS.map((p, i) => (
+              <PromptCard
+                key={i}
+                onClick={() => copyText(p.text, i)}
+              >
+                <PromptLabel>
+                  {p.label}
+                  <CopiedTag>
+                    {copiedIdx === i ? "copied" : "tap to copy"}
+                  </CopiedTag>
+                </PromptLabel>
+                <PromptText>{p.text}</PromptText>
+              </PromptCard>
+            ))}
+          </Section>
         )}
-
-        <DashHint>
-          Dashboard: <code>{"/?room=ROOM_ID#token=TOKEN"}</code>
-        </DashHint>
       </Container>
       <Footer>
         sync {landingData.version} ·{" "}

@@ -47,31 +47,51 @@ export function shell(opts: ShellOptions): string {
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 ${meta}
 <style>
+  /* ── Unified theme: light default, dark via toggle or system pref ── */
   :root {
-    --bg: #0d1117; --fg: #c9d1d9; --dim: #484f58; --border: #21262d;
-    --accent: #58a6ff; --green: #3fb950; --yellow: #d29922; --red: #f85149;
-    --surface: #161b22; --surface2: #1c2129; --purple: #bc8cff; --orange: #f0883e;
-    --lbg: #ffffff; --lfg: #1a1a1a; --ldim: #6b7280;
-    --laccent: #2563eb; --lborder: #e5e7eb; --lsurface: #f4f4f5;
-    --laccent-soft: #dbeafe;
+    --bg: #ffffff; --fg: #1a1a1a; --dim: #6b7280;
+    --accent: #2563eb; --border: #e5e7eb; --surface: #f4f4f5;
+    --accent-soft: #dbeafe;
+    --green: #16a34a; --yellow: #ca8a04; --red: #dc2626;
+    --purple: #7c3aed; --orange: #ea580c;
+    --surface2: #e4e4e7;
+    color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
-      --lbg: #0a0a0c; --lfg: #e4e4e7; --ldim: #71717a;
-      --laccent: #60a5fa; --lborder: #27272a; --lsurface: #18181b;
-      --laccent-soft: #1e3a5f;
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117; --fg: #c9d1d9; --dim: #484f58;
+      --accent: #58a6ff; --border: #21262d; --surface: #161b22;
+      --accent-soft: #1e3a5f;
+      --green: #3fb950; --yellow: #d29922; --red: #f85149;
+      --purple: #bc8cff; --orange: #f0883e;
+      --surface2: #1c2129;
     }
+  }
+  [data-theme="dark"] {
+    --bg: #0d1117; --fg: #c9d1d9; --dim: #484f58;
+    --accent: #58a6ff; --border: #21262d; --surface: #161b22;
+    --accent-soft: #1e3a5f;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --purple: #bc8cff; --orange: #f0883e;
+    --surface2: #1c2129;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   code {
-    background: var(--lsurface);
-    border: 1px solid var(--lborder);
-    color: var(--laccent);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--accent);
     padding: 0.15em 0.4em;
     border-radius: 4px;
     font-size: 0.88em;
   }
 </style>
+<script>
+  // Apply theme before paint to prevent flash
+  (function(){
+    var t = localStorage.getItem("sync-theme");
+    if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
 ${css}
 ${headScripts}
 </head>

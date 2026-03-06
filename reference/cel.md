@@ -1,6 +1,6 @@
-# CEL (Common Expression Language) Reference — agent-sync v5
+# CEL (Common Expression Language) Reference — sync v6
 
-CEL is used throughout agent-sync for predicates, computed values, enabled expressions, and views.
+CEL is used throughout sync for predicates, computed values, enabled expressions, and views.
 
 ## Context Shape
 
@@ -27,20 +27,11 @@ Every CEL expression is evaluated against a context object. The shape depends on
     "attack": { available: true, enabled: true },
     "heal": { available: false, enabled: true }
   },
-  messages: { count: 42, unread: 3 },
+  messages: { count: 42, unread: 3, directed_unread: 1 },
   self: "agent-a",
   params: {}
 }
 ```
-
-### Key Differences from v4
-
-- `state.self` — agent's own scope is always available as `self`, not by ID
-- Other agent scopes are **not visible** in the state tree (private by default)
-- `views` — new top-level object with resolved view values
-- `actions` — includes `available` and `enabled` flags
-- `messages.unread` — tracked per-agent via `last_seen_seq`
-- `params` — populated during action invocation
 
 ### Action/View Evaluation Context
 
@@ -114,6 +105,7 @@ actions["attack"].available == true
 ### Message Tracking
 ```cel
 messages.unread > 0
+messages.directed_unread > 0
 messages.count >= 10
 ```
 

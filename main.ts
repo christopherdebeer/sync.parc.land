@@ -513,21 +513,8 @@ export async function createRoom(body: any) {
   delete room.token_hash;
   delete room.view_token_hash;
 
-  // Seed default _dashboard config as self-documentation
-  const dashboardDefault = JSON.stringify({
-    title: "agent-sync",
-    subtitle: id,
-    default_tab: "agents",
-    tabs: ["agents", "state", "messages", "actions", "views", "audit", "cel"],
-    pinned_views: [],
-    hero: null,
-  });
-  await sqlite.execute({
-    sql: `INSERT INTO state (room_id, scope, key, value, version, updated_at)
-          VALUES (?, '_shared', '_dashboard', ?, 1, datetime('now'))
-          ON CONFLICT(room_id, scope, key) DO NOTHING`,
-    args: [id, dashboardDefault],
-  }).catch(() => {});
+  // Dashboard reads views with render hints — no _dashboard config seeding needed.
+  // Existing rooms with _dashboard state will continue to work (dashboard handles both).
 
   return json({ ...room, token, view_token: viewToken }, 201);
 }
@@ -1593,6 +1580,32 @@ export async function invokeAction(roomId: string, actionId: string, body: any, 
 
     if (!key) return json({ error: "write needs a key (or use append: true)", write: w }, 400);
 
+    // if_version: compare-and-swap on write templates (proof-of-read)
+    if (w.if_version !== undefined) {
+      let expectedVersion = w.if_version;
+      if (typeof expectedVersion === "string" && expectedVersion.includes("${")) {
+        expectedVersion = expectedVersion.replace(/\$\{(params\.(\w+)|self|now)\}/g, (match: string, full: string, paramName: string) => {
+          if (paramName !== undefined) return String(params[paramName] ?? "");
+          if (full === "self") return agent ?? "";
+          if (full === "now") return invokeTs;
+          return match;
+        });
+      }
+      const expected = String(expectedVersion);
+      const current = await sqlite.execute({
+        sql: `SELECT version, value, revision FROM state WHERE room_id = ? AND scope = ? AND key = ?`,
+        args: [roomId, writeScope, key],
+      });
+      if (current.rows.length > 0) {
+        const row = rows2objects(current)[0];
+        if (row.version !== expected) {
+          return json({ error: "version_conflict", expected_version: expected, current: row }, 409);
+        }
+      } else if (expected !== "") {
+        return json({ error: "not_found", message: "key does not exist, use if_version='' to create", scope: writeScope, key }, 404);
+      }
+    }
+
     // Handle merge in action writes
     if (w.merge && typeof w.merge === "object") {
       let mergePayload = deepSubstitute(w.merge, params, agent ?? "", invokeTs);
@@ -2623,7 +2636,7 @@ async function buildIncludeData(roomId: string, includeParam: string | null, ctx
   return data;
 }
 
-async function waitForCondition(roomId: string, url: URL, auth: AuthResult) {
+export async function waitForCondition(roomId: string, url: URL, auth: AuthResult) {
   const condition = url.searchParams.get("condition");
   const agent = url.searchParams.get("agent") ?? auth.agentId;
   const timeoutParam = url.searchParams.get("timeout");

@@ -4,7 +4,7 @@
  * Schema is managed by the parent ../schema.ts (unified migration).
  * This file provides CRUD helpers + ensures smcp_ tables exist.
  */
-import sqlite from "https://esm.town/v/std/sqlite/main.ts";
+import { sqlite } from "https://esm.town/v/std/sqlite";
 import { migrate } from "../schema.ts";
 
 // ─── Schema migration (delegates to unified schema + ensures smcp_ tables) ──

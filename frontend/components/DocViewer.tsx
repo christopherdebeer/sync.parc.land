@@ -2,29 +2,33 @@
 import { useState, useEffect, useCallback } from "https://esm.sh/react@18.2.0";
 import { styled } from "../styled.ts";
 import { processMermaidBlocks, runMermaid } from "../mermaid.ts";
+import { Nav } from "./Nav.tsx";
 
 // ── Raw URL mapping ─────────────────────────────────────────────────────────
 
 const DOC_META: Record<string, { title: string; rawPath: string }> = {
   // --- Reference ---
-  "SKILL.md":    { title: "Orchestrator Skill",  rawPath: "/SKILL.md" },
-  "api.md":      { title: "API Reference",        rawPath: "/reference/api.md" },
-  "cel.md":      { title: "CEL Reference",        rawPath: "/reference/cel.md" },
-  "examples.md": { title: "Examples",             rawPath: "/reference/examples.md" },
-  "v6.md":       { title: "Architecture",         rawPath: "/reference/v6.md" },
-  "views.md":    { title: "Views Reference",      rawPath: "/reference/views.md" },
-  "help.md":     { title: "Help Reference",       rawPath: "/reference/help.md" },
-  "landing.md":  { title: "Landing",              rawPath: "/reference/landing.md" },
+  "SKILL.md":    { title: "Skill Guide",           rawPath: "/SKILL.md" },
+  "api.md":      { title: "API Reference",          rawPath: "/reference/api.md" },
+  "cel.md":      { title: "CEL Reference",          rawPath: "/reference/cel.md" },
+  "examples.md": { title: "Examples",               rawPath: "/reference/examples.md" },
+  "v6.md":       { title: "Architecture",           rawPath: "/reference/v6.md" },
+  "views.md":    { title: "Views Reference",        rawPath: "/reference/views.md" },
+  "help.md":     { title: "Help Reference",         rawPath: "/reference/help.md" },
+  "surfaces.md": { title: "Surfaces Reference",     rawPath: "/reference/surfaces.md" },
+  "landing.md":  { title: "Landing",                rawPath: "/reference/landing.md" },
   // --- Essays & Design ---
-  "what-becomes-true.md":                       { title: "What Becomes True",                rawPath: "/docs/what-becomes-true.md" },
-  "introducing-sync.md":                        { title: "Introducing Sync",                 rawPath: "/docs/introducing-sync.md" },
-  "the-substrate-thesis.md":                    { title: "The Substrate Thesis",              rawPath: "/docs/the-substrate-thesis.md" },
-  "SUBSTRATE.md":                               { title: "Substrate (Compact)",               rawPath: "/docs/SUBSTRATE.md" },
-  "isnt-this-just-react.md":                    { title: "Isn't This Just ReAct?",            rawPath: "/docs/isnt-this-just-react.md" },
-  "pressure-field.md":                          { title: "The Pressure Field",                rawPath: "/docs/pressure-field.md" },
-  "sigma-calculus.md":                          { title: "Σ-calculus",                        rawPath: "/docs/sigma-calculus.md" },
-  "surfaces-design.md":                         { title: "Surfaces as Substrate",             rawPath: "/docs/surfaces-design.md" },
-  "agent-sync-technical-design.md":             { title: "Technical Design",                  rawPath: "/docs/agent-sync-technical-design.md" },
+  "what-becomes-true.md":           { title: "What Becomes True",      rawPath: "/docs/what-becomes-true.md" },
+  "introducing-sync.md":            { title: "Introducing Sync",       rawPath: "/docs/introducing-sync.md" },
+  "the-substrate-thesis.md":        { title: "The Substrate Thesis",   rawPath: "/docs/the-substrate-thesis.md" },
+  "SUBSTRATE.md":                   { title: "Substrate (Compact)",    rawPath: "/docs/SUBSTRATE.md" },
+  "isnt-this-just-react.md":        { title: "Isn't This Just ReAct?", rawPath: "/docs/isnt-this-just-react.md" },
+  "pressure-field.md":              { title: "The Pressure Field",     rawPath: "/docs/pressure-field.md" },
+  "sigma-calculus.md":              { title: "Σ-calculus",             rawPath: "/docs/sigma-calculus.md" },
+  "surfaces-design.md":             { title: "Surfaces as Substrate",  rawPath: "/docs/surfaces-design.md" },
+  "agent-sync-technical-design.md": { title: "Technical Design",       rawPath: "/docs/agent-sync-technical-design.md" },
+  "agency-and-identity.md":         { title: "Agency and Identity",    rawPath: "/docs/agency-and-identity.md" },
+  "frontend-unify.md":              { title: "Frontend Unification",   rawPath: "/docs/frontend-unify.md" },
 };
 
 /** Rewrite *.md hrefs in rendered HTML to /?doc=filename so links work
@@ -43,8 +47,8 @@ function rewriteDocLinks(html: string): string {
 
 const Page = styled.div`
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  background: var(--lbg);
-  color: var(--lfg);
+  background: var(--bg);
+  color: var(--fg);
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -54,8 +58,8 @@ const TopBar = styled.div`
   position: sticky;
   top: 0;
   z-index: 10;
-  background: var(--lsurface);
-  border-bottom: 1px solid var(--lborder);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -67,20 +71,20 @@ const TopBar = styled.div`
 `;
 
 const BackLink = styled.a`
-  color: var(--ldim);
+  color: var(--dim);
   text-decoration: none;
   font-size: 0.85rem;
   display: flex;
   align-items: center;
   gap: 0.35rem;
   white-space: nowrap;
-  &:hover { color: var(--lfg); }
+  &:hover { color: var(--fg); }
 `;
 
 const DocTitle = styled.span`
   font-weight: 600;
   font-size: 0.9rem;
-  color: var(--lfg);
+  color: var(--fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -98,16 +102,16 @@ const Actions = styled.div`
 
 const Btn = styled.button`
   background: transparent;
-  border: 1px solid var(--lborder);
+  border: 1px solid var(--border);
   border-radius: 5px;
-  color: var(--ldim);
+  color: var(--dim);
   font-size: 0.75rem;
   padding: 0.3rem 0.55rem;
   cursor: pointer;
   white-space: nowrap;
   font-family: inherit;
   transition: all 0.15s;
-  &:hover { color: var(--lfg); border-color: var(--ldim); }
+  &:hover { color: var(--fg); border-color: var(--dim); }
   @media (max-width: 480px) {
     font-size: 0.72rem;
     padding: 0.3rem 0.45rem;
@@ -134,7 +138,7 @@ const Prose = styled.div`
     font-weight: 700;
     letter-spacing: -0.02em;
     margin: 2rem 0 0.75rem;
-    color: var(--lfg);
+    color: var(--fg);
     &:first-child { margin-top: 0; }
   }
   h2 {
@@ -142,30 +146,30 @@ const Prose = styled.div`
     font-weight: 600;
     letter-spacing: -0.01em;
     margin: 2rem 0 0.6rem;
-    color: var(--lfg);
+    color: var(--fg);
     padding-bottom: 0.35rem;
-    border-bottom: 1px solid var(--lborder);
+    border-bottom: 1px solid var(--border);
   }
   h3 {
     font-size: 1.02rem;
     font-weight: 600;
     margin: 1.5rem 0 0.4rem;
-    color: var(--lfg);
+    color: var(--fg);
   }
   h4 {
     font-size: 0.92rem;
     font-weight: 600;
     margin: 1.25rem 0 0.35rem;
-    color: var(--ldim);
+    color: var(--dim);
   }
 
   p { margin: 0.6rem 0; }
 
-  a { color: var(--laccent); text-decoration: none; }
+  a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
-  strong { color: var(--lfg); font-weight: 600; }
-  em { color: var(--ldim); }
+  strong { color: var(--fg); font-weight: 600; }
+  em { color: var(--dim); }
 
   ul, ol {
     margin: 0.6rem 0;
@@ -174,18 +178,18 @@ const Prose = styled.div`
   li { margin: 0.25rem 0; }
 
   code {
-    background: var(--lsurface);
-    border: 1px solid var(--lborder);
+    background: var(--surface);
+    border: 1px solid var(--border);
     padding: 0.15em 0.4em;
     border-radius: 4px;
     font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
     font-size: 0.88em;
-    color: var(--laccent);
+    color: var(--accent);
   }
 
   pre {
-    background: var(--lsurface);
-    border: 1px solid var(--lborder);
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 1rem 1.15rem;
     overflow-x: auto;
@@ -198,15 +202,15 @@ const Prose = styled.div`
       padding: 0;
       border-radius: 0;
       font-size: 0.85rem;
-      color: var(--lfg);
+      color: var(--fg);
     }
   }
 
   blockquote {
-    border-left: 3px solid var(--laccent);
+    border-left: 3px solid var(--accent);
     padding: 0.4rem 0 0.4rem 1rem;
     margin: 1rem 0;
-    color: var(--ldim);
+    color: var(--dim);
   }
 
   table {
@@ -219,24 +223,24 @@ const Prose = styled.div`
     -webkit-overflow-scrolling: touch;
   }
   th, td {
-    border: 1px solid var(--lborder);
+    border: 1px solid var(--border);
     padding: 0.45rem 0.7rem;
     text-align: left;
   }
   th {
-    background: var(--lsurface);
+    background: var(--surface);
     font-weight: 600;
-    color: var(--lfg);
+    color: var(--fg);
     white-space: nowrap;
   }
-  td { color: var(--ldim); }
+  td { color: var(--dim); }
   td code {
     font-size: 0.82rem;
   }
 
   hr {
     border: none;
-    border-top: 1px solid var(--lborder);
+    border-top: 1px solid var(--border);
     margin: 2rem 0;
   }
 
@@ -259,7 +263,7 @@ const Prose = styled.div`
 `;
 
 const Loading = styled.div`
-  color: var(--ldim);
+  color: var(--dim);
   font-size: 0.9rem;
   padding: 3rem 0;
   text-align: center;
@@ -270,7 +274,7 @@ const ErrorMsg = styled.div`
   font-size: 0.9rem;
   padding: 2rem;
   text-align: center;
-  a { color: var(--laccent); }
+  a { color: var(--accent); }
 `;
 
 // ── Component ───────────────────────────────────────────────────────────────
@@ -283,7 +287,8 @@ export function DocViewer({ docId }: { docId: string }) {
   const [copied, setCopied] = useState<string | null>(null);
 
   const meta = DOC_META[docId];
-  const rawUrl = meta ? `${location.origin}${meta.rawPath}` : null;
+  const origin = typeof globalThis.location !== "undefined" ? globalThis.location.origin : "";
+  const rawUrl = meta ? `${origin}${meta.rawPath}` : null;
 
   useEffect(() => {
     if (html) runMermaid();
@@ -318,6 +323,7 @@ export function DocViewer({ docId }: { docId: string }) {
   if (!meta) {
     return (
       <Page>
+        <Nav active="docs" />
         <Container>
           <ErrorMsg>
             Unknown document "{docId}". <a href="/">← Back</a>
@@ -329,6 +335,7 @@ export function DocViewer({ docId }: { docId: string }) {
 
   return (
     <Page>
+      <Nav active="docs" />
       <TopBar>
         <BackLink href="/">← sync</BackLink>
         <DocTitle>{meta.title}</DocTitle>

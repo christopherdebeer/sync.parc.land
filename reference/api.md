@@ -1,4 +1,4 @@
-# agent-sync v5 API Reference
+# sync v6 API Reference
 
 Base URL: `https://sync.parc.land`
 
@@ -127,13 +127,14 @@ Returns everything an agent needs in one call: state, views, agents, actions
     }
   },
   "messages": {
-    "count": 12, "unread": 3,
+    "count": 12, "unread": 3, "directed_unread": 1,
     "recent": [
       { "seq": 10, "from": "alice", "kind": "chat", "body": "hello" },
-      { "seq": 11, "from": "bob", "kind": "action_invocation", "body": "heal(...)" },
+      { "seq": 11, "from": "bob", "to": ["alice"], "kind": "negotiation", "body": "..." },
       { "seq": 12, "from": "alice", "kind": "chat", "body": "thanks" }
     ]
   },
+  "_context": { "depth": "lean", "help": [] },
   "self": "alice"
 }
 ```
@@ -189,21 +190,21 @@ This is the only write endpoint. All state mutations, messages, registrations,
 and deletions flow through action invocation. Every invocation is logged to the
 `_audit` scope for traceability.
 
-**Built-in actions** start with `_` and are available in every room:
+**Built-in actions** are available in every room:
 
 | Action | Description | Key params |
 |--------|-------------|------------|
-| `_send_message` | Send a message | `body` (required), `kind` (default: "chat") |
-| `_set_state` | Write state (defaults to own scope) | `key`, `value`, `public`, `merge`, `increment`, `if`, `if_version`, `scope`, `append` |
-| `_batch_set_state` | Batch write (up to 20) | `writes[]`, `if` |
-| `_delete_state` | Delete state entry | `scope`, `key` |
-| `_register_action` | Register a custom action | `id`, `description`, `params`, `writes`, `if`, `enabled`, `scope` |
-| `_delete_action` | Delete an action | `id` |
-| `_register_view` | Register a computed view | `id`, `expr`, `scope` (default: self), `description` |
-| `_delete_view` | Delete a view | `id` |
-| `_heartbeat` | Keep-alive | `status` (default: "active") |
-| `_renew_timer` | Renew a wall-clock timer | `scope`, `key` |
-| `help` | Participant guide (overridable) | — |
+| `_register_action` | Declare a write capability | `id`, `description`, `params`, `writes`, `if`, `enabled`, `result`, `scope` |
+| `_delete_action` | Remove an action | `id` |
+| `_register_view` | Declare a read capability | `id`, `expr`, `scope`, `description`, `render`, `enabled` |
+| `_delete_view` | Remove a view | `id` |
+| `_send_message` | Send a message | `body` (required), `kind` (default: "chat"), `to` (directed routing) |
+| `help` | Read guidance documents (overridable) | `key` |
+
+There is no `_set_state`, `_heartbeat`, or `_renew_timer`. Agents write state by
+registering actions with write templates, then invoking them. The standard library
+(`help({ key: "standard_library" })`) provides ready-to-register patterns for common
+operations like `set`, `delete`, `increment`, `append`, and more.
 
 Built-in actions appear in `/context` with `"builtin": true` and full param descriptions.
 
@@ -239,14 +240,12 @@ POST /rooms/my-room/actions/_register_action/invoke
 - `timer` — lifecycle timer
 - `on_invoke.timer` — cooldown timer applied after each invocation
 
-**State write modes** (via `_set_state` params):
+**State write modes** (in action write templates):
 - `value` — full replacement (default)
-- `merge` — shallow merge into existing object
-- `increment` — atomic counter increment
+- `merge` — deep merge into existing object (null values delete keys)
+- `increment` — atomic counter increment (supports template: `"increment": "${params.amount}"`)
 - `append: true` — two modes: without `key`, creates log-row with auto sort_key; with `key`, does array-push (reads existing value, wraps as array, pushes new value)
-- `if` — CEL write gate
-- `if_version` — CAS (compare-and-swap)
-- `public: true` — auto-create view for private state key
+- `if_version` — CAS (compare-and-swap) using content hash
 - `timer` — attach lifecycle timer to state entry
 
 **Error responses:**
@@ -264,8 +263,8 @@ POST /rooms/my-room/actions/_register_action/invoke
 Every action invocation generates an entry in the `_audit` scope:
 
 ```json
-{ "ts": "2026-02-26T12:55:23Z", "agent": "alice", "action": "_set_state",
-  "builtin": true, "params": { "key": "health", "value": 85 }, "ok": true }
+{ "ts": "2026-02-26T12:55:23Z", "agent": "alice", "action": "submit_result",
+  "builtin": false, "params": { "result": "42" }, "ok": true }
 ```
 
 Entries capture: timestamp, agent identity (or "admin" for room token), action name,
@@ -306,5 +305,6 @@ Evaluate a CEL expression for debugging.
 | Agent (granted) | own + grants | System scopes + own + grants | Own scope + granted scopes |
 | Via action | registrar's | — | Action's defined writes |
 
-Unprivileged agents use built-in actions like `_set_state` (which defaults to
-writing to their own scope) or custom actions that bridge scope authority.
+Unprivileged agents register actions with write templates scoped to their own
+namespace, or invoke custom actions registered by other agents that bridge scope
+authority. The standard library provides canonical patterns: `help({ key: "standard_library" })`.

@@ -45,7 +45,7 @@ import {
   handleVault,
   resolveAdminToken,
   resolveToken,
-} from "./auth.ts";
+} from "./auth.tsx";
 import { type ToolContext, TOOLS } from "./tools.ts";
 
 // ─── Configuration ───────────────────────────────────────────────
