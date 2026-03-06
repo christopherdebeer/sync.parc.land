@@ -21,6 +21,7 @@ import type {
 } from "npm:@simplewebauthn/server@13";
 
 import * as db from "./db.ts";
+import { sqlite } from "https://esm.town/v/std/sqlite";
 import { renderPage } from "../frontend/ssr.ts";
 import { RecoverPage } from "../frontend/pages/recover/RecoverPage.tsx";
 import { ManagePage } from "../frontend/pages/manage/ManagePage.tsx";
@@ -97,7 +98,7 @@ export function handleASMetadata(req: Request): Response {
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
-    scopes_supported: ["sync:rooms", "sync:rooms.admin"],
+    scopes_supported: ["sync:rooms", "create_rooms", "rooms:{room_id}", "rooms:{room_id}:observe", "rooms:{room_id}:role:{role}"],
   });
 }
 
@@ -522,6 +523,20 @@ async function handleAuthCodeExchange(
     scope: authCode.scope ?? undefined,
   });
 
+  // Create user session for the new access token (agency-identity)
+  try {
+    const atHash = await db.sha256(accessToken);
+    await db.createUserSession({
+      tokenHash: atHash,
+      userId: authCode.userId,
+      clientId: authCode.clientId,
+      scope: authCode.scope ?? "sync:rooms",
+      expiresAt: new Date(Date.now() + TOKEN_EXPIRY_SECS * 1000).toISOString(),
+    });
+  } catch (_) { /* best-effort — session tracking is additive */ }
+
+
+
   return json({
     access_token: accessToken,
     token_type: "Bearer",
@@ -565,6 +580,27 @@ async function handleRefreshExchange(
     clientId: rt.clientId,
     scope: rt.scope ?? undefined,
   });
+
+  // Create new user session and transfer embodiments (agency-identity)
+  try {
+    const newAtHash = await db.sha256(accessToken);
+    const newExpiry = new Date(Date.now() + TOKEN_EXPIRY_SECS * 1000).toISOString();
+    await db.createUserSession({
+      tokenHash: newAtHash,
+      userId: rt.userId,
+      clientId: rt.clientId,
+      scope: rt.scope ?? "sync:rooms",
+      expiresAt: newExpiry,
+    });
+    // Transfer embodiments from any existing sessions for this user+client
+    const oldSessions = await db.findSessionsByUserClient(rt.userId, rt.clientId, newAtHash);
+    for (const oldHash of oldSessions) {
+      await db.transferEmbodiments(oldHash, newAtHash);
+      await db.deleteUserSession(oldHash);
+    }
+  } catch (_) { /* best-effort */ }
+
+
 
   return json({
     access_token: accessToken,
@@ -726,6 +762,41 @@ export async function handleManageApi(req: Request): Promise<Response> {
         backed_up: c.backedUp,
       })),
     });
+  }
+
+  // GET /manage/api/rooms — user's rooms with agents and roles (for consent screen)
+  if (req.method === "GET" && path === "/rooms") {
+    const userRooms = await db.listUserRooms(userId);
+    const roomsWithDetail = [];
+    for (const ur of userRooms) {
+      // Fetch agents
+      const agentsRes = await sqlite.execute({
+        sql: `SELECT id, name, role, status, last_heartbeat FROM agents WHERE room_id = ? ORDER BY joined_at`,
+        args: [ur.roomId],
+      });
+      const agents = agentsRes.rows.map((r: any[]) => ({
+        id: r[0], name: r[1], role: r[2], status: r[3], last_heartbeat: r[4],
+      }));
+      // Fetch roles
+      const rolesRes = await sqlite.execute({
+        sql: `SELECT key, value FROM state WHERE room_id = ? AND scope = '_shared' AND key LIKE 'roles.%'`,
+        args: [ur.roomId],
+      });
+      const roles: Record<string, any> = {};
+      for (const r of rolesRes.rows) {
+        const roleId = (r[0] as string).replace("roles.", "");
+        try { roles[roleId] = JSON.parse(r[1] as string); } catch {}
+      }
+      roomsWithDetail.push({
+        room_id: ur.roomId,
+        access: ur.access,
+        label: ur.label,
+        is_default: ur.isDefault,
+        agents,
+        roles,
+      });
+    }
+    return json({ rooms: roomsWithDetail });
   }
 
   // GET /manage/api/vault — full vault with tokens

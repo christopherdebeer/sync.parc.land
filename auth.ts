@@ -205,3 +205,30 @@ function json(data: any, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
+
+// ============ Direct agent auth (no token required) ============
+
+/** Resolve an AuthResult for an agent by ID, without requiring a bearer token.
+ *  Used when trust comes from smcp_user_sessions → smcp_embodiments chain,
+ *  not from a token header. The caller is responsible for authorization. */
+export async function resolveAgentAuth(
+  roomId: string, agentId: string,
+): Promise<AuthResult | null> {
+  const result = await sqlite.execute({
+    sql: `SELECT id, grants FROM agents WHERE id = ? AND room_id = ?`,
+    args: [agentId, roomId],
+  });
+  if (result.rows.length === 0) return null;
+  const grantsJson = result.rows[0][1] as string;
+  let grants: string[] = [];
+  try { grants = JSON.parse(grantsJson); } catch { grants = []; }
+  if (!grants.includes(agentId)) grants = [agentId, ...grants];
+  return {
+    authenticated: true,
+    kind: "agent",
+    agentId,
+    roomId,
+    grants,
+  };
+}

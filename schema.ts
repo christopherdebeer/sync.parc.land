@@ -298,4 +298,43 @@ export async function migrate() {
   // smcp_ column migrations (for existing installs from separate sync-mcp val)
   await addColumn("smcp_credentials", "rp_id", "TEXT");
   await addColumn("smcp_sessions", "scope", "TEXT DEFAULT 'consent'");
+
+  // ============ Agency & Identity tables ============
+  // These support the user→room→agent identity model for MCP clients.
+  // See docs/agency-and-identity.md for the design.
+  await sqlite.batch([
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_user_rooms (
+      user_id TEXT NOT NULL REFERENCES smcp_users(id),
+      room_id TEXT NOT NULL,
+      access TEXT NOT NULL DEFAULT 'participant',
+      is_default INTEGER DEFAULT 0,
+      label TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, room_id)
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_user_sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES smcp_users(id),
+      client_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_embodiments (
+      session_hash TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      embodied_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (session_hash, room_id)
+    )`, args: [] },
+  ]);
+
+  const agencyIndexes = [
+    `CREATE INDEX IF NOT EXISTS idx_smcp_user_rooms_user ON smcp_user_rooms(user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_smcp_embodiments_session ON smcp_embodiments(session_hash)`,
+  ];
+  for (const sql of agencyIndexes) {
+    try { await sqlite.execute({ sql, args: [] }); } catch (_) {}
+  }
+
 }

@@ -1,10 +1,14 @@
 /**
  * tools.ts — MCP tool definitions for sync-mcp
  *
- * Direct function calls to sync's core (no HTTP proxy).
- * Auth resolution: vault token → AuthResult → direct function call.
+ * v3: Agency & Identity model.
+ * - New ToolContext with resolveForRoom (session-aware, embodiment-aware)
+ * - Observe/embody split: read_context is view-level by default, mutations require embodiment
+ * - New tools: sync_lobby, sync_embody, sync_disembody, sync_restrict_scope, sync_revoke_access
+ * - Context decoration: _session block + _current/_switchable agent annotations
  */
 
+import { sqlite } from "https://esm.town/v/std/sqlite";
 import {
   buildExpandedContext,
   createRoom,
@@ -17,16 +21,28 @@ import {
   deleteView,
   evalExpression,
   listRooms,
+  insertAgentDirect,
   waitForCondition,
   type ContextRequest,
 } from "../main.ts";
 
 import {
   resolveAuthFromToken,
+  resolveAgentAuth,
+  generateToken,
+  hashToken,
   type AuthResult,
 } from "../auth.ts";
 
 import { migrate } from "../schema.ts";
+
+import * as db from "./db.ts";
+import {
+  type ParsedScope,
+  parseScope,
+  serializeScope,
+  checkRoomInScope,
+} from "./db.ts";
 
 // ─── Ensure schema on first tool call ────────────────────────────
 
@@ -39,8 +55,26 @@ async function ensureMigrated() {
 
 export interface ToolContext {
   userId: string | null;
-  resolveToken: (room?: string, token?: string) => Promise<{ room: string; token: string } | null>;
-  resolveAdminToken: (room: string) => Promise<string | null>;
+  clientId: string | null;
+  sessionHash: string | null;
+  scope: ParsedScope | null;
+
+  /** Resolve auth for a room, accounting for embodiment state.
+   *  Returns embodied agent's AuthResult (if embodied), or view-level
+   *  AuthResult (if observing), or null (no access). */
+  resolveForRoom: (
+    roomId: string,
+  ) => Promise<{ auth: AuthResult; agentId: string | null } | null>;
+
+  /** Legacy: explicit token override (backward compat for non-OAuth callers) */
+  resolveToken: (
+    room?: string, token?: string,
+  ) => Promise<{ room: string; token: string } | null>;
+
+  /** Admin-level auth for privilege escalation */
+  resolveAdminAuth: (
+    roomId: string,
+  ) => Promise<AuthResult | null>;
 }
 
 // ─── Auth helpers ────────────────────────────────────────────────
@@ -55,7 +89,7 @@ async function tokenToAuth(token: string, roomId: string): Promise<AuthResult> {
   return result;
 }
 
-/** Resolve vault → room + AuthResult for a tool call. */
+/** Resolve vault → room + AuthResult for a tool call (legacy path). */
 async function resolveForTool(
   ctx: ToolContext,
   params: Record<string, unknown>,
@@ -74,8 +108,7 @@ async function resolveForTool(
   return { room: resolved.room, token: resolved.token, auth };
 }
 
-/** Unwrap a Response (from functions that return Response) into data.
- *  Throws on error status codes so MCP returns the error to the client. */
+/** Unwrap a Response into data. Throws on error status. */
 async function unwrap(response: Response): Promise<unknown> {
   const data = await response.json();
   if (response.status >= 400) {
@@ -85,25 +118,6 @@ async function unwrap(response: Response): Promise<unknown> {
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
   }
   return data;
-}
-
-/** Try with agent token first, escalate to admin on scope_denied. */
-async function withEscalation<T>(
-  ctx: ToolContext,
-  room: string,
-  agentAuth: AuthResult,
-  fn: (auth: AuthResult) => Promise<T>,
-  isError: (result: T) => boolean,
-): Promise<T> {
-  const result = await fn(agentAuth);
-  if (!isError(result)) return result;
-
-  // Try admin escalation
-  const adminToken = await ctx.resolveAdminToken(room);
-  if (!adminToken) return result;
-
-  const adminAuth = await tokenToAuth(adminToken, room);
-  return fn(adminAuth);
 }
 
 /** Escalation wrapper for functions returning Response. */
@@ -124,11 +138,86 @@ async function withResponseEscalation(
     throw new Error(typeof error === "string" ? error : JSON.stringify(data));
   }
 
-  const adminToken = await ctx.resolveAdminToken(room);
-  if (!adminToken) throw new Error(typeof error === "string" ? error : JSON.stringify(data));
+  const adminAuth = await ctx.resolveAdminAuth(room);
+  if (!adminAuth) throw new Error(typeof error === "string" ? error : JSON.stringify(data));
 
-  const adminAuth = await tokenToAuth(adminToken, room);
   return unwrap(await fn(adminAuth));
+}
+
+// ─── Helper: rows to objects ─────────────────────────────────────
+
+function rows2objects(result: any) {
+  return result.rows.map((row: any[]) =>
+    Object.fromEntries(result.columns.map((col: string, i: number) => [col, row[i]]))
+  );
+}
+
+// ─── Context decoration ─────────────────────────────────────────
+
+/** Decorate a context response with MCP session metadata.
+ *  Adds _session block + _current/_switchable annotations on agents.
+ *  This is MCP-layer only — buildExpandedContext stays session-unaware. */
+async function decorateContextWithSession(
+  context: Record<string, any>,
+  ctx: ToolContext,
+  roomId: string,
+  currentAgentId: string | null,
+): Promise<Record<string, any>> {
+  if (!ctx.sessionHash || !ctx.userId) return context;
+
+  const userRoom = await db.getUserRoom(ctx.userId, roomId);
+  const canEmbody = userRoom && userRoom.access !== "observer";
+
+  const switchable: string[] = [];
+
+  // Annotate agents in the agents section
+  if (canEmbody && context.agents) {
+    const agentsObj = context.agents;
+    if (typeof agentsObj === "object" && !Array.isArray(agentsObj)) {
+      for (const [agentId, agentData] of Object.entries(agentsObj as Record<string, any>)) {
+        const isCurrent = agentId === currentAgentId;
+        const isIdle = agentData.status === "idle"
+                    || agentData.status === "done"
+                    || agentData.status === "suspended";
+        agentData._current = isCurrent;
+        agentData._switchable = !isCurrent && isIdle;
+        if (agentData._switchable) switchable.push(agentId);
+      }
+    }
+  }
+
+  // Check for unfilled roles
+  try {
+    const rolesResult = await sqlite.execute({
+      sql: `SELECT key, value FROM state
+            WHERE room_id = ? AND scope = '_shared' AND key LIKE 'roles.%'`,
+      args: [roomId],
+    });
+    for (const r of rolesResult.rows) {
+      const roleId = (r[0] as string).replace("roles.", "");
+      try {
+        const def = JSON.parse(r[1] as string);
+        if (!def.filled_by && !switchable.includes(roleId)
+            && roleId !== currentAgentId) {
+          switchable.push(roleId);
+        }
+      } catch {}
+    }
+  } catch {}
+
+  const scopeLevel = ctx.scope?.rooms.get(roomId);
+
+  context._session = {
+    agent: currentAgentId,
+    room: roomId,
+    switchable,
+    scope_level: scopeLevel
+      ? (scopeLevel.level === "role"
+          ? `role:${scopeLevel.role}` : scopeLevel.level)
+      : "full",
+  };
+
+  return context;
 }
 
 // ─── Tool Definitions ────────────────────────────────────────────
@@ -148,18 +237,387 @@ export interface ToolDef {
 }
 
 export const TOOLS: ToolDef[] = [
-  // ── Room lifecycle ──────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════
+  // NEW: Agency & Identity tools
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    name: "sync_lobby",
+    title: "Lobby",
+    description: `Overview of your rooms, agents, and roles. The starting point.
+
+Returns rooms you have access to, with agents, roles, access levels,
+and current embodiments. Agents are annotated with _current and _switchable.
+
+This is observation — no agent presence is created.`,
+    inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async handler(_params, ctx) {
+      if (!ctx.userId) throw new Error("OAuth required");
+      await ensureMigrated();
+
+      const userRooms = await db.listUserRooms(ctx.userId);
+      const embodiments = ctx.sessionHash
+        ? await db.listEmbodiments(ctx.sessionHash) : [];
+
+      const rooms = [];
+      for (const ur of userRooms) {
+        // Check scope allows this room
+        if (ctx.scope && ctx.scope.rooms.size > 0) {
+          if (!ctx.scope.rooms.has(ur.roomId)) continue;
+        }
+
+        // Fetch room agents
+        const agentsResult = await sqlite.execute({
+          sql: `SELECT id, name, role, status, last_heartbeat, waiting_on
+                FROM agents WHERE room_id = ? ORDER BY joined_at`,
+          args: [ur.roomId],
+        });
+        const agents = rows2objects(agentsResult);
+
+        // Fetch role definitions
+        const rolesResult = await sqlite.execute({
+          sql: `SELECT key, value FROM state
+                WHERE room_id = ? AND scope = '_shared' AND key LIKE 'roles.%'`,
+          args: [ur.roomId],
+        });
+        const roles: Record<string, any> = {};
+        for (const r of rolesResult.rows) {
+          const roleId = (r[0] as string).replace("roles.", "");
+          try { roles[roleId] = JSON.parse(r[1] as string); } catch {}
+        }
+
+        const currentEmbodiment = embodiments.find(e => e.roomId === ur.roomId);
+        const canEmbody = ur.access !== "observer";
+
+        const switchableAgents = canEmbody ? agents.filter((a: any) => {
+          if (a.id === currentEmbodiment?.agentId) return false;
+          return a.status === "idle" || a.status === "done";
+        }).map((a: any) => a.id as string) : [];
+
+        const unfilledRoles = Object.entries(roles)
+          .filter(([_, def]) => !def.filled_by)
+          .map(([id]) => id)
+          .filter(id => !switchableAgents.includes(id));
+
+        const scopeLevel = ctx.scope?.rooms.get(ur.roomId);
+
+        rooms.push({
+          id: ur.roomId,
+          access: ur.access,
+          label: ur.label,
+          scope_level: scopeLevel
+            ? (scopeLevel.level === "role" ? `role:${scopeLevel.role}` : scopeLevel.level)
+            : "full",
+          roles,
+          agents: agents.map((a: any) => ({
+            id: a.id, name: a.name, role: a.role, status: a.status,
+            last_heartbeat: a.last_heartbeat, waiting_on: a.waiting_on,
+            _current: currentEmbodiment?.agentId === a.id,
+            _switchable: canEmbody && (a.status === "idle" || a.status === "done") && a.id !== currentEmbodiment?.agentId,
+          })),
+          unfilled_roles: unfilledRoles,
+          embodied_as: currentEmbodiment?.agentId ?? null,
+        });
+      }
+
+      return {
+        user: (await db.getUserById(ctx.userId))?.username ?? ctx.userId,
+        client: ctx.clientId,
+        rooms,
+        can_create_rooms: ctx.scope?.createRooms ?? true,
+        active_embodiments: embodiments,
+      };
+    },
+  },
+
+  {
+    name: "sync_embody",
+    title: "Embody Agent",
+    description: `Commit to an agent in a room. Creates, takes over, or switches agents.
+
+Switching: if already embodied in this room, the old agent is cleanly
+released (set idle, filled_by cleared) before the new one activates.
+Always returns fresh context as the new agent.
+
+One session can embody agents in multiple rooms simultaneously.
+One agent per room per session — call sync_embody again to switch.
+
+Args:
+  - room (string, required): Room ID.
+  - agent (string, optional): Existing agent ID to take over.
+  - role (string, optional): Role to fill (creates/takes agent with role ID).
+  - name (string, optional): Display name for new agent.
+  - state (object, optional): Initial state for new agent.
+
+Returns: Full context with self set to embodied agent, plus _session metadata.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        room: { type: "string", description: "Room ID" },
+        agent: { type: "string", description: "Existing agent ID to take over" },
+        role: { type: "string", description: "Role to fill" },
+        name: { type: "string", description: "Display name for new agent" },
+        state: { type: "object", description: "Initial state for new agent" },
+      },
+      required: ["room"],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    async handler(params, ctx) {
+      if (!ctx.userId || !ctx.sessionHash) throw new Error("OAuth required");
+      await ensureMigrated();
+
+      const roomId = params.room as string;
+
+      // 1. Scope check
+      const requiredLevel = params.role ? "embody_role" as const : "embody" as const;
+      const scopeCheck = checkRoomInScope(ctx.scope!, roomId, requiredLevel, params.role as string);
+      if (!scopeCheck.allowed) throw new Error(`Scope denied: ${scopeCheck.reason}`);
+
+      // 2. User-room access check
+      const userRoom = await db.getUserRoom(ctx.userId, roomId);
+      if (!userRoom) throw new Error(`No access to room ${roomId}. Use sync_lobby to see your rooms.`);
+      if (userRoom.access === "observer") throw new Error("Observer access cannot embody agents");
+
+      // 3. Grants from access level
+      const grants = (userRoom.access === "owner" || userRoom.access === "collaborator")
+        ? ["_shared"] : [];
+
+      // 4. Clean transition: release old agent if switching within this room
+      const previousAgentId = await db.getEmbodiment(ctx.sessionHash, roomId);
+      if (previousAgentId) {
+        await sqlite.execute({
+          sql: `UPDATE agents SET status = 'idle', waiting_on = NULL WHERE id = ? AND room_id = ?`,
+          args: [previousAgentId, roomId],
+        });
+        await sqlite.execute({
+          sql: `UPDATE state SET
+                  value = json_set(value, '$.filled_by', json('null')),
+                  revision = revision + 1, updated_at = datetime('now')
+                WHERE room_id = ? AND scope = '_shared' AND key LIKE 'roles.%'
+                AND json_extract(value, '$.filled_by') = ?`,
+          args: [roomId, previousAgentId],
+        });
+      }
+
+      // 5. Determine agent ID
+      let agentId: string;
+      let isNewAgent = false;
+
+      if (params.role) {
+        agentId = params.role as string;
+        // Verify role exists
+        const roleState = await sqlite.execute({
+          sql: `SELECT value FROM state WHERE room_id = ? AND scope = '_shared' AND key = ?`,
+          args: [roomId, `roles.${agentId}`],
+        });
+        if (roleState.rows.length === 0) throw new Error(`Role "${agentId}" not defined in this room`);
+      } else if (params.agent) {
+        agentId = params.agent as string;
+        const existing = await sqlite.execute({
+          sql: `SELECT id FROM agents WHERE id = ? AND room_id = ?`,
+          args: [agentId, roomId],
+        });
+        if (existing.rows.length === 0) throw new Error(`Agent "${agentId}" not found in room ${roomId}`);
+      } else {
+        // New agent — derive ID from user + client
+        const user = await db.getUserById(ctx.userId);
+        const username = user?.username ?? ctx.userId;
+        const client = await db.getOAuthClient(ctx.clientId!);
+        const clientSlug = (client?.clientName ?? "mcp")
+          .toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
+        agentId = `${username}:${clientSlug}`;
+        isNewAgent = true;
+      }
+
+      // 6. Create or re-activate agent
+      const existingAgent = await sqlite.execute({
+        sql: `SELECT id FROM agents WHERE id = ? AND room_id = ?`,
+        args: [agentId, roomId],
+      });
+
+      if (existingAgent.rows.length === 0 || isNewAgent) {
+        const user = await db.getUserById(ctx.userId);
+        await insertAgentDirect(roomId, {
+          id: agentId,
+          name: (params.name as string) ?? user?.username ?? "agent",
+          role: params.role ? "role" : "mcp-client",
+          grants,
+          state: params.state as Record<string, any> | undefined,
+        });
+      } else {
+        // Re-activate: rotate token, reset status, reset grants
+        const newToken = generateToken("as");
+        const newHash = await hashToken(newToken);
+        await sqlite.execute({
+          sql: `UPDATE agents SET token_hash = ?, status = 'active',
+                last_heartbeat = datetime('now'), waiting_on = NULL, grants = ?
+                WHERE id = ? AND room_id = ?`,
+          args: [newHash, JSON.stringify(grants), agentId, roomId],
+        });
+      }
+
+      // 7. Record embodiment
+      await db.setEmbodiment(ctx.sessionHash, roomId, agentId);
+
+      // 8. Update role filled_by if applicable
+      if (params.role) {
+        await sqlite.execute({
+          sql: `UPDATE state SET
+                  value = json_set(value, '$.filled_by', json(?)),
+                  revision = revision + 1, updated_at = datetime('now')
+                WHERE room_id = ? AND scope = '_shared' AND key = ?`,
+          args: [JSON.stringify(agentId), roomId, `roles.${params.role}`],
+        });
+      }
+
+      // 9. Return fresh context as the new agent
+      const auth = await resolveAgentAuth(roomId, agentId);
+      if (!auth) throw new Error("Failed to resolve agent auth after creation");
+      const context = await buildExpandedContext(roomId, auth, { depth: "lean" });
+
+      // 10. Decorate with _session
+      return decorateContextWithSession(context, ctx, roomId, agentId);
+    },
+  },
+
+  {
+    name: "sync_disembody",
+    title: "Disembody",
+    description: `Release an agent in a room. Agent persists as idle; you stop driving it.
+
+Args:
+  - room (string, required): Room to disembody from.
+
+Returns: Confirmation with disembodied agent ID.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        room: { type: "string", description: "Room to disembody from" },
+      },
+      required: ["room"],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async handler(params, ctx) {
+      if (!ctx.sessionHash) throw new Error("OAuth required");
+      await ensureMigrated();
+      const roomId = params.room as string;
+
+      const agentId = await db.getEmbodiment(ctx.sessionHash, roomId);
+      if (!agentId) throw new Error(`Not embodied in room ${roomId}`);
+
+      // Clean transition
+      await sqlite.execute({
+        sql: `UPDATE agents SET status = 'idle', waiting_on = NULL WHERE id = ? AND room_id = ?`,
+        args: [agentId, roomId],
+      });
+      await sqlite.execute({
+        sql: `UPDATE state SET
+                value = json_set(value, '$.filled_by', json('null')),
+                revision = revision + 1, updated_at = datetime('now')
+              WHERE room_id = ? AND scope = '_shared' AND key LIKE 'roles.%'
+              AND json_extract(value, '$.filled_by') = ?`,
+        args: [roomId, agentId],
+      });
+
+      await db.removeEmbodiment(ctx.sessionHash, roomId);
+      return { ok: true, disembodied: agentId, room: roomId };
+    },
+  },
+
+  {
+    name: "sync_restrict_scope",
+    title: "Restrict Scope",
+    description: `Narrow your session's effective scope for a room.
+
+Args:
+  - room (string, required): Room ID.
+  - level (string, required): "observe" or "role".
+  - role (string, optional): Required when level is "role".`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        room: { type: "string" },
+        level: { type: "string", enum: ["observe", "role"] },
+        role: { type: "string" },
+      },
+      required: ["room", "level"],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async handler(params, ctx) {
+      if (!ctx.sessionHash || !ctx.scope) throw new Error("OAuth required");
+      const roomId = params.room as string;
+      const level = params.level as string;
+      const role = params.role as string | undefined;
+
+      const newScope: ParsedScope = { rooms: new Map(ctx.scope.rooms), createRooms: ctx.scope.createRooms };
+      if (level === "observe") {
+        newScope.rooms.set(roomId, { level: "observe" });
+        // Disembody if currently embodied
+        const agentId = await db.getEmbodiment(ctx.sessionHash, roomId);
+        if (agentId) {
+          await sqlite.execute({
+            sql: `UPDATE agents SET status = 'idle', waiting_on = NULL WHERE id = ? AND room_id = ?`,
+            args: [agentId, roomId],
+          });
+          await db.removeEmbodiment(ctx.sessionHash, roomId);
+        }
+      } else if (level === "role") {
+        if (!role) throw new Error("role parameter required when level is 'role'");
+        newScope.rooms.set(roomId, { level: "role", role });
+      }
+      await db.updateSessionScope(ctx.sessionHash, serializeScope(newScope));
+      return { ok: true, room: roomId, level, role };
+    },
+  },
+
+  {
+    name: "sync_revoke_access",
+    title: "Revoke Room Access",
+    description: `Remove a room from your session's effective scope.
+
+Args:
+  - room (string, required): Room to remove.`,
+    inputSchema: {
+      type: "object",
+      properties: { room: { type: "string" } },
+      required: ["room"],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    async handler(params, ctx) {
+      if (!ctx.sessionHash || !ctx.scope) throw new Error("OAuth required");
+      const roomId = params.room as string;
+      const agentId = await db.getEmbodiment(ctx.sessionHash, roomId);
+      if (agentId) {
+        await sqlite.execute({
+          sql: `UPDATE agents SET status = 'idle', waiting_on = NULL WHERE id = ? AND room_id = ?`,
+          args: [agentId, roomId],
+        });
+        await db.removeEmbodiment(ctx.sessionHash, roomId);
+      }
+      const newScope: ParsedScope = { rooms: new Map(ctx.scope.rooms), createRooms: ctx.scope.createRooms };
+      newScope.rooms.delete(roomId);
+      await db.updateSessionScope(ctx.sessionHash, serializeScope(newScope));
+      return { ok: true, revoked: roomId };
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Room lifecycle
+  // ═══════════════════════════════════════════════════════════════
+
   {
     name: "sync_create_room",
     title: "Create Room",
     description: `Create a new sync collaboration room. Returns the room ID, admin token, and view token.
 
-If authenticated via OAuth, the room token is automatically saved to your vault.
+If authenticated via OAuth, the room is registered in your user-rooms as owner
+and added to your session scope.
 
 Args:
   - id (string, optional): Custom room ID. Auto-generated if omitted.
   - meta (object, optional): Arbitrary metadata for the room.
-  - label (string, optional): Vault label for this room.
+  - label (string, optional): Label for this room.
   - set_default (boolean, optional): Make this the default room.
 
 Returns: { id, token, view_token, created_at }`,
@@ -168,7 +626,7 @@ Returns: { id, token, view_token, created_at }`,
       properties: {
         id: { type: "string", description: "Custom room ID (auto-generated if omitted)" },
         meta: { type: "object", description: "Room metadata (any JSON)" },
-        label: { type: "string", description: "Vault label for this room" },
+        label: { type: "string", description: "Label for this room" },
         set_default: { type: "boolean", description: "Make this the default room" },
       },
     },
@@ -180,27 +638,43 @@ Returns: { id, token, view_token, created_at }`,
       if (params.meta) body.meta = params.meta;
       const result = await unwrap(await createRoom(body)) as Record<string, unknown>;
 
-      // Auto-vault if authenticated
+      // Register user-room relationship + widen session scope
+      if (ctx.userId && result.id) {
+        await db.upsertUserRoom(
+          ctx.userId, result.id as string, "owner",
+          (params.label as string) ?? `Room ${result.id}`,
+          params.set_default as boolean ?? false,
+        );
+        // Widen session scope
+        if (ctx.sessionHash && ctx.scope) {
+          const newScope: ParsedScope = { rooms: new Map(ctx.scope.rooms), createRooms: ctx.scope.createRooms };
+          newScope.rooms.set(result.id as string, { level: "full" });
+          await db.updateSessionScope(ctx.sessionHash, serializeScope(newScope));
+        }
+      }
+
+      // Auto-vault for backward compat
       if (ctx.userId && result.token && result.id) {
-        const { vaultStore } = await import("./db.ts");
-        await vaultStore({
-          userId: ctx.userId,
-          roomId: result.id as string,
-          token: result.token as string,
-          tokenType: "room",
-          label: (params.label as string) ?? `Room ${result.id}`,
-          isDefault: params.set_default as boolean ?? false,
-        });
-        if (result.view_token) {
-          await vaultStore({
+        try {
+          await db.vaultStore({
             userId: ctx.userId,
             roomId: result.id as string,
-            token: result.view_token as string,
-            tokenType: "view",
-            label: `View: ${result.id}`,
+            token: result.token as string,
+            tokenType: "room",
+            label: (params.label as string) ?? `Room ${result.id}`,
+            isDefault: params.set_default as boolean ?? false,
           });
-        }
-        result._vaulted = true;
+          if (result.view_token) {
+            await db.vaultStore({
+              userId: ctx.userId,
+              roomId: result.id as string,
+              token: result.view_token as string,
+              tokenType: "view",
+              label: `View: ${result.id}`,
+            });
+          }
+          result._vaulted = true;
+        } catch (_) {}
       }
       return result;
     },
@@ -210,6 +684,7 @@ Returns: { id, token, view_token, created_at }`,
     name: "sync_list_rooms",
     title: "List Rooms",
     description: `List rooms accessible with the given token. If authenticated, uses vault token.
+Prefer sync_lobby for a richer overview with agents and roles.
 
 Args:
   - token (string, optional): Auth token. Optional if authenticated.
@@ -226,12 +701,10 @@ Returns: Array of room objects.`,
       await ensureMigrated();
       let token = params.token as string | undefined;
       if (!token && ctx.userId) {
-        const { vaultList } = await import("./db.ts");
-        const entries = await vaultList(ctx.userId);
+        const entries = await db.vaultList(ctx.userId);
         if (entries.length > 0) token = entries[0].token;
       }
       if (!token) throw new Error("No token available. Provide 'token' parameter or authenticate via OAuth.");
-      // Construct minimal request for listRooms (it reads Authorization header)
       const fakeReq = new Request("http://internal/rooms", {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -242,26 +715,17 @@ Returns: Array of room objects.`,
   {
     name: "sync_join_room",
     title: "Join Room",
-    description: `Join a sync room as an agent. Returns an agent token (as_xxx).
+    description: `Join a sync room as an agent (low-level). Returns an agent token (as_xxx).
+Prefer sync_embody for the agency-identity flow.
 
-If authenticated, the agent token is automatically saved to your vault.
-
-Args:
-  - room (string, optional): Room ID (uses default if omitted).
-  - token (string, optional): Room admin token (resolved from vault if omitted).
-  - id (string, optional): Agent ID (auto-generated if omitted).
-  - name (string, optional): Display name.
-  - role (string, optional): Agent role.
-  - state (object, optional): Initial private state.
-  - public_keys (string[], optional): State keys to auto-expose as views.
-  - views (array, optional): Pre-register views.
+Args: room, token (optional), id, name, role, state, public_keys, views.
 
 Returns: Agent object with { id, token, room_id, ... }`,
     inputSchema: {
       type: "object",
       properties: {
-        room: { type: "string", description: "Room ID" },
-        token: { type: "string", description: "Room admin token (room_xxx). Optional if authenticated." },
+        room: { type: "string" },
+        token: { type: "string" },
         id: { type: "string", description: "Agent ID" },
         name: { type: "string", description: "Display name" },
         role: { type: "string", description: "Agent role" },
@@ -278,63 +742,55 @@ Returns: Agent object with { id, token, room_id, ... }`,
       for (const key of ["id", "name", "role", "state", "public_keys", "views"]) {
         if (params[key] !== undefined) body[key] = params[key];
       }
-      // joinRoom needs admin token — use escalation
-      const fakeReq = new Request("http://internal/rooms/" + resolved.room + "/agents", {
-        headers: { Authorization: `Bearer ${resolved.token}` },
-      });
       const result = await withResponseEscalation(ctx, resolved.room, resolved.auth, async (auth) => {
-        // joinRoom takes a Request for re-join token verification
         const req = new Request("http://internal/rooms/" + resolved.room + "/agents", {
           headers: auth.kind === "room"
-            ? { Authorization: `Bearer room_placeholder` } // room auth resolved internally
+            ? { Authorization: `Bearer room_placeholder` }
             : { Authorization: `Bearer ${resolved.token}` },
         });
         return joinRoom(resolved.room, body, req);
       }) as Record<string, unknown>;
 
-      // Auto-vault agent token
       if (ctx.userId && result.token) {
-        const { vaultStore } = await import("./db.ts");
-        await vaultStore({
-          userId: ctx.userId,
-          roomId: resolved.room,
-          token: result.token as string,
-          tokenType: "agent",
-          label: `Agent: ${result.id ?? "unknown"}`,
-        });
-        result._vaulted = true;
+        try {
+          await db.vaultStore({
+            userId: ctx.userId,
+            roomId: resolved.room,
+            token: result.token as string,
+            tokenType: "agent",
+            label: `Agent: ${result.id ?? "unknown"}`,
+          });
+          result._vaulted = true;
+        } catch (_) {}
       }
       return result;
     },
   },
 
-  // ── Core rhythm: read → act ─────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════
+  // Core rhythm: read → act
+  // ═══════════════════════════════════════════════════════════════
 
   {
     name: "sync_read_context",
     title: "Read Context",
     description: `THE primary read operation. Returns the full room context.
 
-This is the "read" in the read → evaluate → act rhythm.
+If embodied in this room, reads as the embodied agent (full scope, heartbeat ticks).
+If not embodied, reads as observer (view-level, no presence).
+Includes _session metadata with switchable agents.
 
 Args:
-  - room (string, optional): Room ID (uses default if omitted).
-  - token (string, optional): Auth token (resolved from vault if omitted).
-  - depth (string, optional): "lean" | "full" | "usage"
-  - only (string, optional): Section filter, e.g. "state,actions"
-  - actions (boolean, optional): Include actions (default true)
-  - messages (boolean, optional): Include messages (default true)
-  - messages_after (number, optional): Seq cursor
-  - messages_limit (number, optional): Max messages
-  - include (string, optional): Extra scopes, e.g. "_audit"
-  - compact (boolean, optional): Strip nulls
+  - room (string, required): Room ID.
+  - token (string, optional): Auth token (legacy — prefer OAuth + embodiment).
+  - depth, only, actions, messages, messages_after, messages_limit, include, compact.
 
-Returns: { state, views, agents, actions, messages, self, _context }`,
+Returns: { state, views, agents, actions, messages, self, _context, _session }`,
     inputSchema: {
       type: "object",
       properties: {
         room: { type: "string", description: "Room ID" },
-        token: { type: "string", description: "Auth token" },
+        token: { type: "string", description: "Auth token (legacy)" },
         depth: { type: "string", enum: ["lean", "full", "usage"] },
         only: { type: "string" },
         actions: { type: "boolean" },
@@ -344,13 +800,14 @@ Returns: { state, views, agents, actions, messages, self, _context }`,
         include: { type: "string" },
         compact: { type: "boolean" },
       },
+      required: ["room"],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
-      const resolved = await resolveForTool(ctx, params);
+      const roomId = params.room as string;
 
-      // Build ContextRequest directly (no URL parsing needed)
+      // Build ContextRequest
       const ctxReq: ContextRequest = {};
       if (params.depth) ctxReq.depth = params.depth as "lean" | "full" | "usage";
       if (params.only) ctxReq.only = (params.only as string).split(",").map(s => s.trim());
@@ -360,7 +817,17 @@ Returns: { state, views, agents, actions, messages, self, _context }`,
       if (params.messages_limit !== undefined) ctxReq.messagesLimit = params.messages_limit as number;
       if (params.include) ctxReq.include = (params.include as string).split(",").map(s => s.trim());
 
-      // Direct call — returns data, not Response!
+      // New path: session-aware resolution
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}. Use sync_lobby to see your rooms.`);
+
+        const context = await buildExpandedContext(roomId, resolved.auth, ctxReq);
+        return decorateContextWithSession(context, ctx, roomId, resolved.agentId);
+      }
+
+      // Legacy fallback: explicit token
+      const resolved = await resolveForTool(ctx, params);
       return buildExpandedContext(resolved.room, resolved.auth, ctxReq);
     },
   },
@@ -370,14 +837,13 @@ Returns: { state, views, agents, actions, messages, self, _context }`,
     title: "Invoke Action",
     description: `THE primary write operation. Invoke any action (built-in or custom) in a room.
 
-This is the "act" in the read → evaluate → act rhythm.
+Requires embodiment — call sync_embody first if not yet embodied.
 
 Args:
-  - room (string, optional): Room ID (uses default if omitted).
-  - token (string, optional): Auth token (resolved from vault if omitted).
+  - room (string, required): Room ID.
+  - token (string, optional): Auth token (legacy).
   - action (string, required): Action ID to invoke.
   - params (object, optional): Parameters for the action.
-  - agent (string, optional): Agent identity override.
 
 Returns: { invoked, action, agent, params, writes, result? }`,
     inputSchema: {
@@ -387,19 +853,30 @@ Returns: { invoked, action, agent, params, writes, result? }`,
         token: { type: "string" },
         action: { type: "string", description: "Action ID to invoke" },
         params: { type: "object", description: "Action parameters" },
-        agent: { type: "string", description: "Agent identity override" },
       },
-      required: ["action"],
+      required: ["room", "action"],
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     async handler(params, ctx) {
       await ensureMigrated();
+      const roomId = params.room as string;
+
+      // New path: session-aware
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        if (!resolved.agentId) {
+          throw new Error(`Not embodied in room ${roomId}. Call sync_embody first.`);
+        }
+        const body: Record<string, unknown> = {};
+        if (params.params) body.params = params.params;
+        return unwrap(await invokeAction(roomId, params.action as string, body, resolved.auth));
+      }
+
+      // Legacy fallback
       const resolved = await resolveForTool(ctx, params);
       const body: Record<string, unknown> = {};
       if (params.params) body.params = params.params;
-      if (params.agent) body.agent = params.agent;
-
-      // Direct call to invokeAction (handles both custom and builtin)
       return unwrap(await invokeAction(resolved.room, params.action as string, body, resolved.auth));
     },
   },
@@ -410,10 +887,11 @@ Returns: { invoked, action, agent, params, writes, result? }`,
     description: `Block until a CEL condition becomes true, then return room context.
 
 Args:
-  - room (string, optional): Room ID.
-  - token (string, optional): Auth token.
+  - room (string, required): Room ID.
+  - token (string, optional): Auth token (legacy).
   - condition (string, required): CEL expression.
   - timeout (number, optional): Max wait ms (default: 25000).
+  - depth, only: Context shaping params.
 
 Returns: { triggered: true/false, condition, context }`,
     inputSchema: {
@@ -426,34 +904,45 @@ Returns: { triggered: true/false, condition, context }`,
         depth: { type: "string", enum: ["lean", "full", "usage"] },
         only: { type: "string" },
       },
-      required: ["condition"],
+      required: ["room", "condition"],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     async handler(params, ctx) {
       await ensureMigrated();
-      const resolved = await resolveForTool(ctx, params);
+      const roomId = params.room as string;
 
-      // Construct URL with query params for waitForCondition
-      const url = new URL(`http://internal/rooms/${resolved.room}/wait`);
+      // Resolve auth (embodied or view-level)
+      let auth: AuthResult;
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        auth = resolved.auth;
+      } else {
+        const resolved = await resolveForTool(ctx, params);
+        auth = resolved.auth;
+      }
+
+      // Build URL for waitForCondition
+      const url = new URL(`http://internal/rooms/${roomId}/wait`);
       url.searchParams.set("condition", params.condition as string);
       if (params.timeout) url.searchParams.set("timeout", String(params.timeout));
       if (params.depth) url.searchParams.set("depth", params.depth as string);
       if (params.only) url.searchParams.set("only", params.only as string);
 
-      const auth = await tokenToAuth(resolved.token, resolved.room);
-      const res = await waitForCondition(resolved.room, url, auth);
-      return res.json();
+      return unwrap(await waitForCondition(roomId, url, auth));
     },
   },
 
-  // ── Sugar for common built-in actions ───────────────────────
+  // ═══════════════════════════════════════════════════════════════
+  // Sugar for common built-in actions
+  // ═══════════════════════════════════════════════════════════════
 
   {
     name: "sync_register_action",
     title: "Register Action",
-    description: `Register a new action in a room.
+    description: `Register a new action in a room. Requires embodiment.
 
-Args: room, token (optional if authed), id (required), description, writes, params, scope, if, enabled, result, on_invoke.
+Args: room (required), id (required), description, writes, params, scope, if, enabled, result, on_invoke.
 
 Returns: Saved action definition.`,
     inputSchema: {
@@ -471,17 +960,27 @@ Returns: Saved action definition.`,
         result: { type: "string", description: "CEL result expression" },
         on_invoke: { type: "object", description: "Cooldown timer" },
       },
-      required: ["id"],
+      required: ["room", "id"],
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
-      const resolved = await resolveForTool(ctx, params);
+      const roomId = params.room as string;
       const actionBody: Record<string, unknown> = {};
       for (const key of ["id", "description", "writes", "params", "scope", "if", "enabled", "result", "on_invoke"]) {
         if (params[key] !== undefined) actionBody[key] = params[key];
       }
-      // Uses escalation: agent token first, admin fallback for _shared scope
+
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        if (!resolved.agentId) throw new Error(`Not embodied in room ${roomId}. Call sync_embody first.`);
+        return withResponseEscalation(ctx, roomId, resolved.auth, (auth) =>
+          registerAction(roomId, actionBody, auth)
+        );
+      }
+
+      const resolved = await resolveForTool(ctx, params);
       return withResponseEscalation(ctx, resolved.room, resolved.auth, (auth) =>
         registerAction(resolved.room, actionBody, auth)
       );
@@ -491,9 +990,9 @@ Returns: Saved action definition.`,
   {
     name: "sync_register_view",
     title: "Register View",
-    description: `Register a computed view — a named CEL expression.
+    description: `Register a computed view. Requires embodiment.
 
-Args: room, token (optional if authed), id (required), expr (required), description, scope, enabled, render.
+Args: room (required), id (required), expr (required), description, scope, enabled, render.
 
 Returns: View with current resolved value.`,
     inputSchema: {
@@ -508,16 +1007,27 @@ Returns: View with current resolved value.`,
         enabled: { type: "string" },
         render: { type: "object" },
       },
-      required: ["id", "expr"],
+      required: ["room", "id", "expr"],
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
-      const resolved = await resolveForTool(ctx, params);
+      const roomId = params.room as string;
       const viewBody: Record<string, unknown> = {};
       for (const key of ["id", "expr", "description", "scope", "enabled", "render"]) {
         if (params[key] !== undefined) viewBody[key] = params[key];
       }
+
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        if (!resolved.agentId) throw new Error(`Not embodied in room ${roomId}. Call sync_embody first.`);
+        return withResponseEscalation(ctx, roomId, resolved.auth, (auth) =>
+          registerView(roomId, viewBody, auth)
+        );
+      }
+
+      const resolved = await resolveForTool(ctx, params);
       return withResponseEscalation(ctx, resolved.room, resolved.auth, (auth) =>
         registerView(resolved.room, viewBody, auth)
       );
@@ -527,9 +1037,9 @@ Returns: View with current resolved value.`,
   {
     name: "sync_send_message",
     title: "Send Message",
-    description: `Send a message to a sync room.
+    description: `Send a message to a sync room. Requires embodiment.
 
-Args: room, token (optional if authed), body (required), kind, to.
+Args: room (required), body (required), kind, to.
 
 Returns: { ok, seq, from, kind }`,
     inputSchema: {
@@ -541,15 +1051,24 @@ Returns: { ok, seq, from, kind }`,
         kind: { type: "string" },
         to: { type: "string", description: "Direct to agent(s)" },
       },
-      required: ["body"],
+      required: ["room", "body"],
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
-      const resolved = await resolveForTool(ctx, params);
+      const roomId = params.room as string;
       const msgParams: Record<string, unknown> = { body: params.body };
       if (params.kind) msgParams.kind = params.kind;
       if (params.to) msgParams.to = params.to;
+
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        if (!resolved.agentId) throw new Error(`Not embodied in room ${roomId}. Call sync_embody first.`);
+        return unwrap(await invokeBuiltinAction(roomId, "_send_message", { params: msgParams }, resolved.auth));
+      }
+
+      const resolved = await resolveForTool(ctx, params);
       return unwrap(await invokeBuiltinAction(resolved.room, "_send_message", { params: msgParams }, resolved.auth));
     },
   },
@@ -559,7 +1078,7 @@ Returns: { ok, seq, from, kind }`,
     title: "Get Help",
     description: `Access the sync help system.
 
-Args: room, token (optional if authed), key (optional).
+Args: room (required), key (optional).
 
 Returns: { content, version, source }`,
     inputSchema: {
@@ -569,13 +1088,23 @@ Returns: { content, version, source }`,
         token: { type: "string" },
         key: { type: "string", description: "Help key" },
       },
+      required: ["room"],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
-      const resolved = await resolveForTool(ctx, params);
+      const roomId = params.room as string;
       const helpParams: Record<string, unknown> = {};
       if (params.key) helpParams.key = params.key;
+
+      // Help works in observe mode — no embodiment required
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        return unwrap(await invokeBuiltinAction(roomId, "help", { params: helpParams }, resolved.auth));
+      }
+
+      const resolved = await resolveForTool(ctx, params);
       return unwrap(await invokeBuiltinAction(resolved.room, "help", { params: helpParams }, resolved.auth));
     },
   },
@@ -585,7 +1114,7 @@ Returns: { content, version, source }`,
     title: "Evaluate CEL",
     description: `Evaluate a CEL expression against the current room state.
 
-Args: room, token (optional if authed), expr (required).
+Args: room (required), expr (required).
 
 Returns: { expression, value }`,
     inputSchema: {
@@ -595,11 +1124,19 @@ Returns: { expression, value }`,
         token: { type: "string" },
         expr: { type: "string", description: "CEL expression" },
       },
-      required: ["expr"],
+      required: ["room", "expr"],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
+      const roomId = params.room as string;
+
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        return unwrap(await evalExpression(roomId, { expr: params.expr }, resolved.auth));
+      }
+
       const resolved = await resolveForTool(ctx, params);
       return unwrap(await evalExpression(resolved.room, { expr: params.expr }, resolved.auth));
     },
@@ -608,9 +1145,9 @@ Returns: { expression, value }`,
   {
     name: "sync_delete_action",
     title: "Delete Action",
-    description: `Remove an action from a room.
+    description: `Remove an action from a room. Requires embodiment.
 
-Args: room, token (optional if authed), id (required).`,
+Args: room (required), id (required).`,
     inputSchema: {
       type: "object",
       properties: {
@@ -618,11 +1155,20 @@ Args: room, token (optional if authed), id (required).`,
         token: { type: "string" },
         id: { type: "string", description: "Action ID to delete" },
       },
-      required: ["id"],
+      required: ["room", "id"],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
+      const roomId = params.room as string;
+
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        if (!resolved.agentId) throw new Error(`Not embodied in room ${roomId}. Call sync_embody first.`);
+        return unwrap(await deleteAction(roomId, params.id as string, resolved.auth));
+      }
+
       const resolved = await resolveForTool(ctx, params);
       return unwrap(await deleteAction(resolved.room, params.id as string, resolved.auth));
     },
@@ -631,9 +1177,9 @@ Args: room, token (optional if authed), id (required).`,
   {
     name: "sync_delete_view",
     title: "Delete View",
-    description: `Remove a view from a room.
+    description: `Remove a view from a room. Requires embodiment.
 
-Args: room, token (optional if authed), id (required).`,
+Args: room (required), id (required).`,
     inputSchema: {
       type: "object",
       properties: {
@@ -641,30 +1187,41 @@ Args: room, token (optional if authed), id (required).`,
         token: { type: "string" },
         id: { type: "string", description: "View ID to delete" },
       },
-      required: ["id"],
+      required: ["room", "id"],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
+      const roomId = params.room as string;
+
+      if (ctx.resolveForRoom) {
+        const resolved = await ctx.resolveForRoom(roomId);
+        if (!resolved) throw new Error(`No access to room ${roomId}`);
+        if (!resolved.agentId) throw new Error(`Not embodied in room ${roomId}. Call sync_embody first.`);
+        return unwrap(await deleteView(roomId, params.id as string, resolved.auth));
+      }
+
       const resolved = await resolveForTool(ctx, params);
       return unwrap(await deleteView(resolved.room, params.id as string, resolved.auth));
     },
   },
 
-  // ── Vault management (auth-only) ───────────────────────────
+  // ═══════════════════════════════════════════════════════════════
+  // Vault management (auth-only, backward compat)
+  // ═══════════════════════════════════════════════════════════════
 
   {
     name: "sync_vault_list",
     title: "List Vault",
-    description: `List all sync tokens stored in your vault. Requires OAuth authentication.
+    description: `List all sync tokens stored in your vault. Requires OAuth.
+Prefer sync_lobby for a richer view of your rooms.
 
 Returns: Array of vault entries with room_id, token_type, label, is_default.`,
     inputSchema: { type: "object", properties: {} },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async handler(_params, ctx) {
       if (!ctx.userId) throw new Error("OAuth authentication required for vault access.");
-      const { vaultList } = await import("./db.ts");
-      const entries = await vaultList(ctx.userId);
+      const entries = await db.vaultList(ctx.userId);
       return entries.map((e) => ({
         id: e.id,
         room_id: e.roomId,
@@ -679,14 +1236,9 @@ Returns: Array of vault entries with room_id, token_type, label, is_default.`,
   {
     name: "sync_vault_store",
     title: "Store Token in Vault",
-    description: `Add a sync token to your vault. Requires OAuth authentication.
+    description: `Add a sync token to your vault. Requires OAuth.
 
-Args:
-  - room_id (string, required): Room ID this token belongs to.
-  - token (string, required): The sync token (room_xxx, as_xxx, or view_xxx).
-  - token_type (string, required): "room", "agent", or "view".
-  - label (string, optional): Human-readable label.
-  - set_default (boolean, optional): Make this the default room.
+Args: room_id (required), token (required), token_type (required), label, set_default.
 
 Returns: { id, room_id, token_type }`,
     inputSchema: {
@@ -703,8 +1255,7 @@ Returns: { id, room_id, token_type }`,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     async handler(params, ctx) {
       if (!ctx.userId) throw new Error("OAuth authentication required for vault access.");
-      const { vaultStore } = await import("./db.ts");
-      const id = await vaultStore({
+      const id = await db.vaultStore({
         userId: ctx.userId,
         roomId: params.room_id as string,
         token: params.token as string,
@@ -719,10 +1270,9 @@ Returns: { id, room_id, token_type }`,
   {
     name: "sync_vault_remove",
     title: "Remove from Vault",
-    description: `Remove a token from your vault. Requires OAuth authentication.
+    description: `Remove a token from your vault. Requires OAuth.
 
-Args:
-  - id (string, required): Vault entry ID (from sync_vault_list).
+Args: id (required): Vault entry ID (from sync_vault_list).
 
 Returns: { deleted: true }`,
     inputSchema: {
@@ -735,8 +1285,7 @@ Returns: { deleted: true }`,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       if (!ctx.userId) throw new Error("OAuth authentication required for vault access.");
-      const { vaultDelete } = await import("./db.ts");
-      await vaultDelete(ctx.userId, params.id as string);
+      await db.vaultDelete(ctx.userId, params.id as string);
       return { deleted: true, id: params.id };
     },
   },

@@ -7,20 +7,20 @@
  *
  * Server renders the sign-in form. Client hydration adds WebAuthn + dashboard.
  */
-import { useState, useCallback } from "https://esm.sh/react@18.2.0";
+import { useCallback, useState } from "https://esm.sh/react@18.2.0";
 import { styled } from "../../styled.ts";
 import { Nav } from "../../components/Nav.tsx";
 import {
-  PageWrapper,
   Card,
-  Title,
-  TitleDim,
-  Subtitle,
-  Label,
+  ErrorText,
   Input,
+  Label,
+  PageWrapper,
   PrimaryButton,
   StatusText,
-  ErrorText,
+  Subtitle,
+  Title,
+  TitleDim,
 } from "../../components/mcp.tsx";
 
 export interface ManagePageProps {
@@ -166,12 +166,11 @@ const Td = styled.td<{ $actions?: boolean; $hideMobile?: boolean }>`
   padding: 0.6rem 0.5rem;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
-  ${({ $actions }) => $actions && `white-space: nowrap; text-align: right;`}
-  ${({ $hideMobile }) =>
+  ${({ $actions }) => $actions && `white-space: nowrap; text-align: right;`} ${(
+    { $hideMobile },
+  ) =>
     $hideMobile &&
-    `@media (max-width: 600px) { display: none; }`}
-
-  @media (max-width: 600px) {
+    `@media (max-width: 600px) { display: none; }`} @media (max-width: 600px) {
     padding: 0.4rem 0.3rem;
   }
 `;
@@ -197,8 +196,8 @@ const TokenType = styled.span<{ $type: string }>`
     $type === "room"
       ? `background: #1a2a1a; color: #6c6;`
       : $type === "agent"
-        ? `background: #2a2a1a; color: #cc6;`
-        : `background: #1a1a2a; color: #88f;`}
+      ? `background: #2a2a1a; color: #cc6;`
+      : `background: #1a1a2a; color: #88f;`};
 `;
 
 const DefaultBadge = styled.span`
@@ -234,10 +233,10 @@ const ActionBtn = styled.button<{ $variant?: string }>`
     $variant === "revoke"
       ? `color: var(--red, #f85149); &:hover { background: var(--surface); }`
       : $variant === "default"
-        ? `color: var(--accent, #58a6ff); &:hover { background: var(--surface); }`
-        : $variant === "dash"
-          ? `color: var(--purple, #bc8cff); &:hover { background: var(--surface); }`
-          : `color: var(--dim); &:hover { background: var(--surface2); }`}
+      ? `color: var(--accent, #58a6ff); &:hover { background: var(--surface); }`
+      : $variant === "dash"
+      ? `color: var(--purple, #bc8cff); &:hover { background: var(--surface); }`
+      : `color: var(--dim); &:hover { background: var(--surface2); }`};
 `;
 
 const DashLink = styled.a`
@@ -523,8 +522,7 @@ export function ManagePage({ origin }: ManagePageProps) {
     const data = await api("GET", "/recovery", undefined, sid);
     if (!data) return;
     const active = (data.tokens || []).filter(
-      (t: RecoveryToken) =>
-        !t.used && new Date(t.expiresAt) > new Date(),
+      (t: RecoveryToken) => !t.used && new Date(t.expiresAt) > new Date(),
     );
     setRecoveryTokens(active);
   }
@@ -590,226 +588,255 @@ export function ManagePage({ origin }: ManagePageProps) {
       <Nav active="manage" />
       <PageWrapper>
         <ManageContainer>
-        {phase === "auth" && (
-          <ManageCard>
-            <Title>
-              sync<TitleDim>·manage</TitleDim>
-            </Title>
-            <Subtitle>
-              Sign in or create an account to manage your sync rooms, tokens, and passkeys.
-            </Subtitle>
-
-            <ModeToggle>
-              <ModeTab
-                $active={authMode === "signin"}
-                onClick={() => { setAuthMode("signin"); setError(""); setStatus(""); }}
-              >
-                Sign in
-              </ModeTab>
-              <ModeTab
-                $active={authMode === "register"}
-                onClick={() => { setAuthMode("register"); setError(""); setStatus(""); }}
-              >
-                Register
-              </ModeTab>
-            </ModeToggle>
-
-            {authMode === "register" && (
-              <div>
-                <Label htmlFor="manage-username">Username</Label>
-                <Input
-                  id="manage-username"
-                  type="text"
-                  placeholder="Choose a username"
-                  autoComplete="username"
-                  onKeyDown={(e) => e.key === "Enter" && doAuth()}
-                />
-              </div>
-            )}
-
-            <PrimaryButton onClick={doAuth}>
-              {authMode === "register"
-                ? "Create account with passkey"
-                : "Sign in with passkey"}
-            </PrimaryButton>
-            {status && <StatusText>{status}</StatusText>}
-            {error && <ErrorText>{error}</ErrorText>}
-          </ManageCard>
-        )}
-
-        {phase === "dashboard" && (
-          <>
-            {/* Header + Passkeys */}
+          {phase === "auth" && (
             <ManageCard>
-              <ManageHeader>
-                <Title style={{ margin: 0 }}>
-                  sync<TitleDim>·mcp</TitleDim>
-                </Title>
-                <HeaderRight>
-                  <UserBadge>{username}</UserBadge>
-                  <SignOutButton onClick={signOut}>Sign out</SignOutButton>
-                </HeaderRight>
-              </ManageHeader>
+              <Title>
+                sync<TitleDim>·manage</TitleDim>
+              </Title>
+              <Subtitle>
+                Sign in or create an account to manage your sync rooms, tokens,
+                and passkeys.
+              </Subtitle>
 
-              <SectionTitle>Passkeys</SectionTitle>
-              <PasskeyList>
-                {passkeys.length > 0 ? (
-                  passkeys.map((p) => (
-                    <PasskeyChip key={p.id}>
-                      {p.id}
-                      {p.backed_up && <SyncedBadge>synced</SyncedBadge>}
-                    </PasskeyChip>
-                  ))
-                ) : (
-                  <span style={{ color: "#666", fontSize: "0.85rem" }}>
-                    No passkeys found
-                  </span>
-                )}
-              </PasskeyList>
-            </ManageCard>
+              <ModeToggle>
+                <ModeTab
+                  $active={authMode === "signin"}
+                  onClick={() => {
+                    setAuthMode("signin");
+                    setError("");
+                    setStatus("");
+                  }}
+                >
+                  Sign in
+                </ModeTab>
+                <ModeTab
+                  $active={authMode === "register"}
+                  onClick={() => {
+                    setAuthMode("register");
+                    setError("");
+                    setStatus("");
+                  }}
+                >
+                  Register
+                </ModeTab>
+              </ModeToggle>
 
-            {/* Vault */}
-            <ManageCard>
-              <SectionTitle>Token Vault</SectionTitle>
-              {vault.length === 0 ? (
-                <EmptyState>
-                  No tokens in vault yet.
-                  <br />
-                  Connect an MCP client to create rooms and tokens will appear
-                  here.
-                </EmptyState>
-              ) : (
-                <VaultTable>
-                  <thead>
-                    <tr>
-                      <Th>Room</Th>
-                      <Th>Type</Th>
-                      <Th style={{ display: undefined }} className="hide-mobile">
-                        Label
-                      </Th>
-                      <Th style={{ textAlign: "right" }}>Actions</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.entries(roomGroups).map(([roomId, entries]) =>
-                      entries.map((e, i) => (
-                        <Tr key={e.id}>
-                          <Td>
-                            {i === 0 && <RoomId>{roomId}</RoomId>}
-                          </Td>
-                          <Td>
-                            <TokenType $type={e.token_type}>
-                              {e.token_type}
-                            </TokenType>
-                            {e.is_default && (
-                              <DefaultBadge>★ default</DefaultBadge>
-                            )}
-                          </Td>
-                          <Td $hideMobile>
-                            <LabelText>{e.label || ""}</LabelText>
-                          </Td>
-                          <Td $actions>
-                            <DashLink
-                              href={`${dashBase}?room=${encodeURIComponent(roomId)}#token=${encodeURIComponent(e.token)}`}
-                              target="_blank"
-                              title="Open dashboard"
-                            >
-                              dash ↗
-                            </DashLink>
-                            <ActionBtn
-                              onClick={() => copyToken(e.token)}
-                            >
-                              copy
-                            </ActionBtn>
-                            {!e.is_default && e.token_type === "room" && (
-                              <ActionBtn
-                                $variant="default"
-                                onClick={() => setDefault(e.id)}
-                                title="Set as default room"
-                              >
-                                ☆ default
-                              </ActionBtn>
-                            )}
-                            <ActionBtn
-                              $variant="revoke"
-                              onClick={() =>
-                                revoke(
-                                  e.id,
-                                  `${e.token_type} for ${roomId}`,
-                                )
-                              }
-                            >
-                              revoke
-                            </ActionBtn>
-                          </Td>
-                        </Tr>
-                      )),
-                    )}
-                  </tbody>
-                </VaultTable>
-              )}
-            </ManageCard>
-
-            {/* Recovery */}
-            <ManageCard>
-              <SectionTitle>Recovery Tokens</SectionTitle>
-              {recoveryTokens.length === 0 ? (
-                <span style={{ color: "#666", fontSize: "0.85rem" }}>
-                  No active recovery tokens.
-                </span>
-              ) : (
-                recoveryTokens.map((t) => (
-                  <RecoveryRow key={t.id}>
-                    <span style={{ color: "#888" }}>
-                      Created {t.createdAt.split("T")[0]}
-                    </span>
-                    <span style={{ color: "#666" }}>
-                      expires {t.expiresAt.split("T")[0]}
-                    </span>
-                    <ActionBtn
-                      $variant="revoke"
-                      onClick={() => revokeRecovery(t.id)}
-                    >
-                      revoke
-                    </ActionBtn>
-                  </RecoveryRow>
-                ))
-              )}
-              <div style={{ marginTop: "0.75rem" }}>
-                <SmallPrimary onClick={generateRecovery}>
-                  Generate recovery token
-                </SmallPrimary>
-              </div>
-              {newRecoveryToken && (
-                <RecoveryBox>
-                  <RecoveryWarning>
-                    Copy this token now — it will not be shown again.
-                  </RecoveryWarning>
-                  <RecoveryInput
+              {authMode === "register" && (
+                <div>
+                  <Label htmlFor="manage-username">Username</Label>
+                  <Input
+                    id="manage-username"
                     type="text"
-                    readOnly
-                    value={newRecoveryToken}
-                    onClick={(e) =>
-                      (e.target as HTMLInputElement).select()
-                    }
+                    placeholder="Choose a username"
+                    autoComplete="username"
+                    onKeyDown={(e) => e.key === "Enter" && doAuth()}
                   />
-                  <ActionBtn
-                    onClick={() => {
-                      navigator.clipboard.writeText(newRecoveryToken);
-                      toast("Recovery token copied");
-                    }}
-                    style={{ fontSize: "0.82rem" }}
-                  >
-                    copy
-                  </ActionBtn>
-                </RecoveryBox>
+                </div>
               )}
-            </ManageCard>
-          </>
-        )}
 
-        <Toast $show={toastVisible}>{toastMsg}</Toast>
-      </ManageContainer>
+              <PrimaryButton onClick={doAuth}>
+                {authMode === "register"
+                  ? "Create account with passkey"
+                  : "Sign in with passkey"}
+              </PrimaryButton>
+              {status && <StatusText>{status}</StatusText>}
+              {error && <ErrorText>{error}</ErrorText>}
+            </ManageCard>
+          )}
+
+          {phase === "dashboard" && (
+            <>
+              {/* Header + Passkeys */}
+              <ManageCard>
+                <ManageHeader>
+                  <Title style={{ margin: 0 }}>
+                    sync<TitleDim>·mcp</TitleDim>
+                  </Title>
+                  <HeaderRight>
+                    <UserBadge>{username}</UserBadge>
+                    <SignOutButton onClick={signOut}>Sign out</SignOutButton>
+                  </HeaderRight>
+                </ManageHeader>
+
+                <SectionTitle>Passkeys</SectionTitle>
+                <PasskeyList>
+                  {passkeys.length > 0
+                    ? (
+                      passkeys.map((p) => (
+                        <PasskeyChip key={p.id}>
+                          {p.id}
+                          {p.backed_up && <SyncedBadge>synced</SyncedBadge>}
+                        </PasskeyChip>
+                      ))
+                    )
+                    : (
+                      <span style={{ color: "#666", fontSize: "0.85rem" }}>
+                        No passkeys found
+                      </span>
+                    )}
+                </PasskeyList>
+              </ManageCard>
+
+              {/* Vault */}
+              <ManageCard>
+                <SectionTitle>Token Vault</SectionTitle>
+                {vault.length === 0
+                  ? (
+                    <EmptyState>
+                      No tokens in vault yet.
+                      <br />
+                      Connect an MCP client to create rooms and tokens will
+                      appear here.
+                    </EmptyState>
+                  )
+                  : (
+                    <VaultTable>
+                      <thead>
+                        <tr>
+                          <Th>Room</Th>
+                          <Th>Type</Th>
+                          <Th
+                            style={{ display: undefined }}
+                            className="hide-mobile"
+                          >
+                            Label
+                          </Th>
+                          <Th style={{ textAlign: "right" }}>Actions</Th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(roomGroups).map(([roomId, entries]) =>
+                          entries.map((e, i) => (
+                            <Tr key={e.id}>
+                              <Td>
+                                {i === 0 && (<>
+                                  {e.is_default && (
+                                  <DefaultBadge title="current default room">★</DefaultBadge>
+                                )}
+                                  {!e.is_default && e.token_type === "room" && (
+                                  <ActionBtn
+                                    $variant="default"
+                                    onClick={() => setDefault(e.id)}
+                                    title="Set as default room"
+                                  >
+                                    ☆
+                                  </ActionBtn>
+                                )}
+                                  <RoomId>
+                                    <DashLink
+                                      href={`${dashBase}?room=${
+                                        encodeURIComponent(roomId)
+                                      }#token=${encodeURIComponent(e.token)}`}
+                                      target="_blank"
+                                      title="Open dashboard"
+                                    >
+                                      {roomId}
+                                    </DashLink>
+                                  </RoomId>
+                                </>)}
+                              </Td>
+                              <Td>
+                                <TokenType $type={e.token_type}>
+                                  {e.token_type}
+                                </TokenType>
+                              </Td>
+                              <Td $hideMobile>
+                                <DashLink
+                                  href={`${dashBase}?room=${
+                                    encodeURIComponent(roomId)
+                                  }#token=${encodeURIComponent(e.token)}`}
+                                  target="_blank"
+                                  title="Open dashboard"
+                                >
+                                  <LabelText>{e.label || ""}</LabelText>
+                                </DashLink>
+                              </Td>
+                              <Td $actions>
+                                <ActionBtn
+                                  onClick={() => copyToken(e.token)}
+                                >
+                                  copy
+                                </ActionBtn>
+                                
+                                <ActionBtn
+                                  $variant="revoke"
+                                  onClick={() =>
+                                    revoke(
+                                      e.id,
+                                      `${e.token_type} for ${roomId}`,
+                                    )}
+                                >
+                                  revoke
+                                </ActionBtn>
+                              </Td>
+                            </Tr>
+                          ))
+                        )}
+                      </tbody>
+                    </VaultTable>
+                  )}
+              </ManageCard>
+
+              {/* Recovery */}
+              <ManageCard>
+                <SectionTitle>Recovery Tokens</SectionTitle>
+                {recoveryTokens.length === 0
+                  ? (
+                    <span style={{ color: "#666", fontSize: "0.85rem" }}>
+                      No active recovery tokens.
+                    </span>
+                  )
+                  : (
+                    recoveryTokens.map((t) => (
+                      <RecoveryRow key={t.id}>
+                        <span style={{ color: "#888" }}>
+                          Created {t.createdAt.split("T")[0]}
+                        </span>
+                        <span style={{ color: "#666" }}>
+                          expires {t.expiresAt.split("T")[0]}
+                        </span>
+                        <ActionBtn
+                          $variant="revoke"
+                          onClick={() => revokeRecovery(t.id)}
+                        >
+                          revoke
+                        </ActionBtn>
+                      </RecoveryRow>
+                    ))
+                  )}
+                <div style={{ marginTop: "0.75rem" }}>
+                  <SmallPrimary onClick={generateRecovery}>
+                    Generate recovery token
+                  </SmallPrimary>
+                </div>
+                {newRecoveryToken && (
+                  <RecoveryBox>
+                    <RecoveryWarning>
+                      Copy this token now — it will not be shown again.
+                    </RecoveryWarning>
+                    <RecoveryInput
+                      type="text"
+                      readOnly
+                      value={newRecoveryToken}
+                      onClick={(e) => (e.target as HTMLInputElement).select()}
+                    />
+                    <ActionBtn
+                      onClick={() => {
+                        navigator.clipboard.writeText(newRecoveryToken);
+                        toast("Recovery token copied");
+                      }}
+                      style={{ fontSize: "0.82rem" }}
+                    >
+                      copy
+                    </ActionBtn>
+                  </RecoveryBox>
+                )}
+              </ManageCard>
+            </>
+          )}
+
+          <Toast $show={toastVisible}>{toastMsg}</Toast>
+        </ManageContainer>
       </PageWrapper>
     </>
   );

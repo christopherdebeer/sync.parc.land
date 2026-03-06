@@ -107,6 +107,53 @@ export const STANDARD_LIBRARY: any[] = [
     writes: [],
     _note: "Register this action then invoke _register_view with scope=self and expr referencing your scope key.",
   },
+  // ── Role management (agency-and-identity pattern) ──
+  {
+    id: "define_role",
+    description: "Declare a role this room needs filled. The role_id becomes the agent ID when filled.",
+    params: {
+      role_id: { type: "string", description: "Role identifier (becomes agent ID when filled)" },
+      description: { type: "string", description: "What this role does" },
+      bootstrap_actions: { type: "array", description: "Action IDs this role should register on fill" },
+      bootstrap_views: { type: "array", description: "View IDs this role should register on fill" },
+    },
+    writes: [{
+      scope: "_shared",
+      key: "roles.${params.role_id}",
+      merge: {
+        description: "${params.description}",
+        filled_by: null,
+        defined_at: "${now}",
+      },
+    }],
+  },
+  {
+    id: "fill_role",
+    description: "Claim a role in this room (sets filled_by to your agent ID)",
+    params: {
+      role_id: { type: "string", description: "Role to fill" },
+    },
+    if: 'has(state["_shared"], "roles." + params.role_id)',
+    writes: [{
+      scope: "_shared",
+      key: "roles.${params.role_id}",
+      merge: { filled_by: "${self}", filled_at: "${now}" },
+    }],
+  },
+  {
+    id: "vacate_role",
+    description: "Release a role you are filling",
+    params: {
+      role_id: { type: "string", description: "Role to vacate" },
+    },
+    if: 'has(state["_shared"], "roles." + params.role_id) && state["_shared"]["roles." + params.role_id].filled_by == self',
+    writes: [{
+      scope: "_shared",
+      key: "roles.${params.role_id}",
+      merge: { filled_by: null, vacated_at: "${now}" },
+    }],
+  },
+
 ];
 
 /** System default help content — keyed namespace.

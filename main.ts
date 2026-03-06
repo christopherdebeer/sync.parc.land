@@ -216,6 +216,92 @@ export async function joinRoom(roomId: string, body: any, req: Request) {
   return json({ ...agent, token }, 201);
 }
 
+/** Create or re-activate an agent without HTTP request auth.
+ *  Trust boundary: caller is responsible for authorization.
+ *  Used by MCP embodiment where trust source is smcp_user_rooms, not a room token.
+ *  Returns the agent ID and raw token. */
+export async function insertAgentDirect(
+  roomId: string,
+  params: {
+    id: string;
+    name: string;
+    role?: string;
+    meta?: Record<string, any>;
+    grants?: string[];
+    state?: Record<string, any>;
+    publicKeys?: string[];
+    views?: Array<{ id: string; expr: string; description?: string }>;
+  },
+): Promise<{ agentId: string; token: string }> {
+  const id = params.id;
+  const name = params.name;
+  const role = params.role ?? "agent";
+  const meta = JSON.stringify(params.meta ?? {});
+  const grants = JSON.stringify(params.grants ?? []);
+  const token = generateToken("as");
+  const hash = await hashToken(token);
+
+  await sqlite.execute({
+    sql: `INSERT OR REPLACE INTO agents
+            (id, room_id, name, role, meta, last_heartbeat, status,
+             token_hash, grants, last_seen_seq)
+          VALUES (?, ?, ?, ?, ?, datetime('now'), 'active', ?, ?, 0)`,
+    args: [id, roomId, name, role, meta, hash, grants],
+  });
+
+  // Inline initial state
+  if (params.state && typeof params.state === "object") {
+    const stmts: any[] = [];
+    for (const [key, value] of Object.entries(params.state)) {
+      const strValue = typeof value === "string" ? value : JSON.stringify(value);
+      stmts.push({
+        sql: `INSERT INTO state (room_id, scope, key, value, version,
+                revision, updated_at)
+              VALUES (?, ?, ?, ?, '', 1, datetime('now'))
+              ON CONFLICT(room_id, scope, key) DO UPDATE SET
+                value = excluded.value, revision = state.revision + 1,
+                updated_at = datetime('now')`,
+        args: [roomId, id, key, strValue],
+      });
+      if (params.publicKeys?.includes(key)) {
+        const viewId = `${id}.${key}`;
+        const expr = `state["${id}"]["${key}"]`;
+        stmts.push({
+          sql: `INSERT INTO views (id, room_id, scope, description, expr,
+                  registered_by, version)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(id, room_id) DO UPDATE SET
+                  expr = excluded.expr, version = views.version + 1`,
+          args: [viewId, roomId, id, `auto: ${id}.${key}`, expr, id],
+        });
+      }
+    }
+    if (stmts.length > 0) await sqlite.batch(stmts);
+  }
+
+  // Inline views
+  if (Array.isArray(params.views)) {
+    const stmts: any[] = [];
+    for (const v of params.views) {
+      if (!v.id || !v.expr) continue;
+      stmts.push({
+        sql: `INSERT INTO views (id, room_id, scope, description, expr,
+                registered_by, version)
+              VALUES (?, ?, ?, ?, ?, ?, 1)
+              ON CONFLICT(id, room_id) DO UPDATE SET
+                expr = excluded.expr, description = excluded.description,
+                version = views.version + 1`,
+        args: [v.id, roomId, id, v.description ?? null, v.expr, id],
+      });
+    }
+    if (stmts.length > 0) await sqlite.batch(stmts);
+  }
+
+  return { agentId: id, token };
+}
+
+
+
 async function updateAgent(roomId: string, agentId: string, body: any) {
   // Only room token / admin can update grants and role
   const sets: string[] = [];

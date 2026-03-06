@@ -615,3 +615,319 @@ export async function cleanupExpired() {
     // Keep access/refresh tokens for audit; could prune old ones
   ]);
 }
+
+// ─── Scope Parsing ──────────────────────────────────────────────
+
+export interface ParsedScope {
+  rooms: Map<string, RoomScope>;
+  createRooms: boolean;
+}
+
+export interface RoomScope {
+  level: "full" | "observe" | "role";
+  role?: string;
+}
+
+/** Parse OAuth scope string into structured form.
+ *  Format: "rooms:X rooms:Y:role:Z rooms:W:observe create_rooms" */
+export function parseScope(scope: string): ParsedScope {
+  const result: ParsedScope = { rooms: new Map(), createRooms: false };
+  for (const part of scope.split(/\s+/).filter(Boolean)) {
+    if (part === "create_rooms") {
+      result.createRooms = true;
+    } else if (part.startsWith("rooms:")) {
+      const segments = part.split(":");
+      const roomId = segments[1];
+      if (!roomId) continue;
+      if (segments[2] === "observe") {
+        result.rooms.set(roomId, { level: "observe" });
+      } else if (segments[2] === "role" && segments[3]) {
+        result.rooms.set(roomId, { level: "role", role: segments[3] });
+      } else {
+        result.rooms.set(roomId, { level: "full" });
+      }
+    }
+    // Legacy: "sync:rooms" or "sync:rooms.admin" → broad access (no room restriction)
+  }
+  return result;
+}
+
+/** Serialize a ParsedScope back to a scope string. */
+export function serializeScope(parsed: ParsedScope): string {
+  const parts: string[] = [];
+  for (const [roomId, scope] of parsed.rooms) {
+    if (scope.level === "observe") parts.push(`rooms:${roomId}:observe`);
+    else if (scope.level === "role") parts.push(`rooms:${roomId}:role:${scope.role}`);
+    else parts.push(`rooms:${roomId}`);
+  }
+  if (parsed.createRooms) parts.push("create_rooms");
+  return parts.join(" ");
+}
+
+/** Check if a scope grants access to a room at the required level. */
+export function checkRoomInScope(
+  parsed: ParsedScope, roomId: string,
+  requiredLevel: "observe" | "embody" | "embody_role",
+  role?: string,
+): { allowed: boolean; reason?: string } {
+  const roomScope = parsed.rooms.get(roomId);
+
+  // No room-level grants AND no rooms in scope → legacy broad scope, defer to user_rooms
+  if (!roomScope && parsed.rooms.size === 0) {
+    return { allowed: true };
+  }
+
+  if (!roomScope) {
+    return { allowed: false, reason: "room_not_in_scope" };
+  }
+
+  if (requiredLevel === "observe") return { allowed: true };
+
+  if (roomScope.level === "observe") {
+    return { allowed: false, reason: "scope_observe_only" };
+  }
+
+  if (requiredLevel === "embody_role" && roomScope.level === "role") {
+    if (roomScope.role !== role) {
+      return { allowed: false, reason: "scope_role_mismatch" };
+    }
+  }
+
+  return { allowed: true };
+}
+
+// ─── User-Room CRUD ─────────────────────────────────────────────
+
+export async function upsertUserRoom(
+  userId: string, roomId: string, access: string,
+  label?: string, isDefault?: boolean,
+) {
+  if (isDefault) {
+    await sqlite.execute({
+      sql: "UPDATE smcp_user_rooms SET is_default = 0 WHERE user_id = ?",
+      args: [userId],
+    });
+  }
+  await sqlite.execute({
+    sql: `INSERT INTO smcp_user_rooms (user_id, room_id, access, label, is_default)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(user_id, room_id) DO UPDATE SET
+            access = excluded.access,
+            label = COALESCE(excluded.label, smcp_user_rooms.label),
+            is_default = COALESCE(excluded.is_default, smcp_user_rooms.is_default)`,
+    args: [userId, roomId, access, label ?? null, isDefault ? 1 : 0],
+  });
+}
+
+export async function getUserRoom(userId: string, roomId: string) {
+  const res = await sqlite.execute({
+    sql: "SELECT user_id, room_id, access, is_default, label, created_at FROM smcp_user_rooms WHERE user_id = ? AND room_id = ?",
+    args: [userId, roomId],
+  });
+  if (res.rows.length === 0) return null;
+  const r = res.rows[0];
+  return {
+    userId: r[0] as string, roomId: r[1] as string,
+    access: r[2] as string, isDefault: r[3] === 1,
+    label: r[4] as string | null, createdAt: r[5] as string,
+  };
+}
+
+export async function listUserRooms(userId: string) {
+  const res = await sqlite.execute({
+    sql: `SELECT user_id, room_id, access, is_default, label, created_at
+          FROM smcp_user_rooms WHERE user_id = ?
+          ORDER BY is_default DESC, created_at DESC`,
+    args: [userId],
+  });
+  return res.rows.map((r) => ({
+    userId: r[0] as string, roomId: r[1] as string,
+    access: r[2] as string, isDefault: r[3] === 1,
+    label: r[4] as string | null, createdAt: r[5] as string,
+  }));
+}
+
+export async function deleteUserRoom(userId: string, roomId: string) {
+  await sqlite.execute({
+    sql: "DELETE FROM smcp_user_rooms WHERE user_id = ? AND room_id = ?",
+    args: [userId, roomId],
+  });
+}
+
+// ─── User Session CRUD (OAuth-token-level) ──────────────────────
+
+export async function createUserSession(params: {
+  tokenHash: string; userId: string; clientId: string;
+  scope: string; expiresAt: string;
+}) {
+  await sqlite.execute({
+    sql: `INSERT INTO smcp_user_sessions
+            (token_hash, user_id, client_id, scope, expires_at)
+          VALUES (?, ?, ?, ?, ?)`,
+    args: [params.tokenHash, params.userId, params.clientId,
+           params.scope, params.expiresAt],
+  });
+}
+
+export async function getUserSession(tokenHash: string) {
+  const res = await sqlite.execute({
+    sql: `SELECT token_hash, user_id, client_id, scope, created_at, expires_at
+          FROM smcp_user_sessions
+          WHERE token_hash = ? AND expires_at > datetime('now')`,
+    args: [tokenHash],
+  });
+  if (res.rows.length === 0) return null;
+  const r = res.rows[0];
+  return {
+    tokenHash: r[0] as string, userId: r[1] as string,
+    clientId: r[2] as string, scope: r[3] as string,
+    createdAt: r[4] as string, expiresAt: r[5] as string,
+  };
+}
+
+export async function updateSessionScope(tokenHash: string, scope: string) {
+  await sqlite.execute({
+    sql: `UPDATE smcp_user_sessions SET scope = ? WHERE token_hash = ?`,
+    args: [scope, tokenHash],
+  });
+}
+
+export async function deleteUserSession(tokenHash: string) {
+  await sqlite.execute({
+    sql: "DELETE FROM smcp_embodiments WHERE session_hash = ?",
+    args: [tokenHash],
+  });
+  await sqlite.execute({
+    sql: "DELETE FROM smcp_user_sessions WHERE token_hash = ?",
+    args: [tokenHash],
+  });
+}
+
+/** Transfer embodiments from old session to new (for token refresh). */
+export async function transferEmbodiments(
+  oldTokenHash: string, newTokenHash: string,
+) {
+  const res = await sqlite.execute({
+    sql: "SELECT room_id, agent_id FROM smcp_embodiments WHERE session_hash = ?",
+    args: [oldTokenHash],
+  });
+  if (res.rows.length === 0) return;
+  const stmts = res.rows.map((r) => ({
+    sql: `INSERT OR IGNORE INTO smcp_embodiments
+            (session_hash, room_id, agent_id, embodied_at)
+          VALUES (?, ?, ?, datetime('now'))`,
+    args: [newTokenHash, r[0] as string, r[1] as string],
+  }));
+  await sqlite.batch(stmts);
+  await sqlite.execute({
+    sql: "DELETE FROM smcp_embodiments WHERE session_hash = ?",
+    args: [oldTokenHash],
+  });
+}
+
+// ─── Embodiment CRUD ────────────────────────────────────────────
+
+export async function setEmbodiment(
+  sessionHash: string, roomId: string, agentId: string,
+) {
+  await sqlite.execute({
+    sql: `INSERT INTO smcp_embodiments (session_hash, room_id, agent_id)
+          VALUES (?, ?, ?)
+          ON CONFLICT(session_hash, room_id) DO UPDATE SET
+            agent_id = excluded.agent_id,
+            embodied_at = datetime('now')`,
+    args: [sessionHash, roomId, agentId],
+  });
+}
+
+export async function getEmbodiment(sessionHash: string, roomId: string) {
+  const res = await sqlite.execute({
+    sql: `SELECT agent_id FROM smcp_embodiments
+          WHERE session_hash = ? AND room_id = ?`,
+    args: [sessionHash, roomId],
+  });
+  if (res.rows.length === 0) return null;
+  return res.rows[0][0] as string;
+}
+
+export async function listEmbodiments(sessionHash: string) {
+  const res = await sqlite.execute({
+    sql: `SELECT room_id, agent_id, embodied_at FROM smcp_embodiments
+          WHERE session_hash = ? ORDER BY embodied_at DESC`,
+    args: [sessionHash],
+  });
+  return res.rows.map((r) => ({
+    roomId: r[0] as string, agentId: r[1] as string,
+    embodiedAt: r[2] as string,
+  }));
+}
+
+export async function removeEmbodiment(sessionHash: string, roomId: string) {
+  await sqlite.execute({
+    sql: "DELETE FROM smcp_embodiments WHERE session_hash = ? AND room_id = ?",
+    args: [sessionHash, roomId],
+  });
+}
+
+export async function removeAllEmbodiments(sessionHash: string) {
+  await sqlite.execute({
+    sql: "DELETE FROM smcp_embodiments WHERE session_hash = ?",
+    args: [sessionHash],
+  });
+}
+
+// ─── Vault → User-Rooms Migration (one-time) ────────────────────
+
+/** Migrate existing vault room-token entries to smcp_user_rooms as 'owner'.
+ *  Runs once when smcp_user_rooms is empty and vault has entries. */
+export async function migrateVaultToUserRooms() {
+  const count = await sqlite.execute({
+    sql: "SELECT COUNT(*) FROM smcp_user_rooms", args: [],
+  });
+  if (Number(count.rows[0][0]) > 0) return; // Already has data
+
+  const vaultEntries = await sqlite.execute({
+    sql: `SELECT DISTINCT user_id, room_id FROM smcp_vault
+          WHERE token_type = 'room'`,
+    args: [],
+  });
+  if (vaultEntries.rows.length === 0) return;
+
+  const stmts = vaultEntries.rows.map(r => ({
+    sql: `INSERT OR IGNORE INTO smcp_user_rooms
+            (user_id, room_id, access, is_default)
+          VALUES (?, ?, 'owner', 0)`,
+    args: [r[0] as string, r[1] as string],
+  }));
+  await sqlite.batch(stmts);
+
+  // Migrate default flag
+  const defaults = await sqlite.execute({
+    sql: `SELECT user_id, room_id FROM smcp_vault
+          WHERE is_default = 1 AND token_type = 'room'`,
+    args: [],
+  });
+  for (const r of defaults.rows) {
+    await sqlite.execute({
+      sql: `UPDATE smcp_user_rooms SET is_default = 1
+            WHERE user_id = ? AND room_id = ?`,
+      args: [r[0] as string, r[1] as string],
+    });
+  }
+}
+
+
+/** Find all active session hashes for a user+client (for transfer during refresh). */
+export async function findSessionsByUserClient(
+  userId: string, clientId: string, excludeHash?: string,
+) {
+  let sql = `SELECT token_hash FROM smcp_user_sessions
+             WHERE user_id = ? AND client_id = ? AND expires_at > datetime('now')`;
+  const args: any[] = [userId, clientId];
+  if (excludeHash) {
+    sql += ` AND token_hash != ?`;
+    args.push(excludeHash);
+  }
+  const res = await sqlite.execute({ sql, args });
+  return res.rows.map(r => r[0] as string);
+}

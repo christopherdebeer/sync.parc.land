@@ -1,14 +1,14 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
-/** AuthorizePage — OAuth sign-in/register + consent.
+/** AuthorizePage — OAuth sign-in/register + consent with room-level scope.
  *
  * Two-step flow:
  *   1. Sign in (passkey) or Register (username + passkey)
- *   2. Consent screen: grant access, pick default room, allow/deny
+ *   2. Consent screen: select rooms, set per-room scope level, allow/deny
  *
  * Server validates OAuth params and passes them as props.
  * Client hydration adds WebAuthn + consent interactions.
  */
-import { useState, useEffect } from "https://esm.sh/react@18.2.0";
+import { useState } from "https://esm.sh/react@18.2.0";
 import { styled } from "../../styled.ts";
 import {
   PageWrapper,
@@ -41,7 +41,7 @@ export interface AuthorizePageProps {
   params: OAuthParams;
 }
 
-// ─── Authorize-specific styled components ────────────────────────
+// ─── Styled components ───────────────────────────────────────────
 
 const ModeToggle = styled.div`
   display: flex;
@@ -64,26 +64,82 @@ const Tab = styled.button<{ $active?: boolean }>`
   font-family: inherit;
 `;
 
-const ScopeBox = styled.div`
-  background: var(--bg, #0d1117);
-  border: 1px solid var(--border, #21262d);
-  border-radius: 8px;
-  padding: 1rem;
+const ScopeSection = styled.div`
   margin: 1rem 0;
+`;
+
+const RoomRow = styled.div<{ $selected?: boolean }>`
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid ${({ $selected }) => $selected ? "var(--accent, #58a6ff)" : "var(--border, #21262d)"};
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  background: ${({ $selected }) => $selected ? "var(--accent-soft, #1e3a5f)" : "var(--bg, #0d1117)"};
+  cursor: pointer;
+  transition: all 0.15s;
+
+  &:hover {
+    border-color: var(--accent, #58a6ff);
+  }
+`;
+
+const RoomCheck = styled.input`
+  accent-color: var(--accent, #58a6ff);
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+`;
+
+const RoomInfo = styled.div`
+  flex: 1;
+  min-width: 0;
+`;
+
+const RoomName = styled.span`
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--fg, #c9d1d9);
+`;
+
+const RoomMeta = styled.span`
+  font-size: 0.75rem;
+  color: var(--dim, #484f58);
+  margin-left: 0.5rem;
+`;
+
+const RoomDetail = styled.div`
+  font-size: 0.75rem;
+  color: var(--dim, #484f58);
+  margin-top: 0.2rem;
+`;
+
+const ScopeSelect = styled.select`
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border, #21262d);
+  border-radius: 6px;
+  background: var(--surface, #161b22);
+  color: var(--fg, #c9d1d9);
+  font-size: 0.8rem;
+  font-family: inherit;
+  flex-shrink: 0;
+`;
+
+const OptionRow = styled.label`
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0;
   font-size: 0.85rem;
+  color: var(--fg, #c9d1d9);
+  cursor: pointer;
+`;
 
-  code {
-    color: var(--purple, #bc8cff);
-  }
-
-  ul {
-    margin: 0.5rem 0 0 1.25rem;
-    color: #999;
-  }
-
-  li {
-    margin: 0.25rem 0;
-  }
+const CheckBox = styled.input`
+  accent-color: var(--accent, #58a6ff);
+  width: 0.9rem;
+  height: 0.9rem;
 `;
 
 const ButtonRow = styled.div`
@@ -93,43 +149,50 @@ const ButtonRow = styled.div`
   justify-content: flex-end;
 `;
 
-const RoomPicker = styled.div`
-  margin-top: 0.5rem;
-`;
-
-const RoomSelect = styled.select`
-  width: 100%;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--border, #21262d);
-  border-radius: 8px;
-  background: var(--bg, #0d1117);
-  color: var(--fg, #c9d1d9);
-  font-size: 0.85rem;
-  font-family: inherit;
-  margin-bottom: 0.5rem;
-`;
-
 const HintText = styled.p`
   font-size: 0.75rem;
-  color: #666;
+  color: var(--dim, #484f58);
+  margin-top: 0.5rem;
+  line-height: 1.45;
 `;
 
-const PickerLabel = styled.p`
+const SectionLabel = styled.p`
   font-size: 0.85rem;
-  color: #999;
+  font-weight: 600;
+  color: var(--fg, #c9d1d9);
   margin-bottom: 0.5rem;
 `;
 
-// ─── Component ───────────────────────────────────────────────────
+const EmptyState = styled.p`
+  font-size: 0.85rem;
+  color: var(--dim, #484f58);
+  padding: 0.75rem;
+  text-align: center;
+  border: 1px dashed var(--border, #21262d);
+  border-radius: 8px;
+`;
+
+// ─── Types ───────────────────────────────────────────────────────
 
 type Step = "auth" | "consent";
 type Mode = "signin" | "register";
+type RoomScopeLevel = "full" | "observe";
 
-interface RoomOption {
-  vaultId: string;
-  roomId: string;
-  isDefault: boolean;
+interface RoomData {
+  room_id: string;
+  access: string;
+  label: string | null;
+  is_default: boolean;
+  agents: Array<{ id: string; name: string; role: string; status: string }>;
+  roles: Record<string, any>;
 }
+
+interface RoomSelection {
+  selected: boolean;
+  level: RoomScopeLevel;
+}
+
+// ─── Component ───────────────────────────────────────────────────
 
 export function AuthorizePage({ origin, params }: AuthorizePageProps) {
   const [step, setStep] = useState<Step>("auth");
@@ -137,8 +200,9 @@ export function AuthorizePage({ origin, params }: AuthorizePageProps) {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [rooms, setRooms] = useState<RoomOption[]>([]);
-  const [selectedRoom, setSelectedRoom] = useState("");
+  const [rooms, setRooms] = useState<RoomData[]>([]);
+  const [selections, setSelections] = useState<Record<string, RoomSelection>>({});
+  const [canCreate, setCanCreate] = useState(true);
 
   function clearStatus() {
     setStatus("");
@@ -160,148 +224,121 @@ export function AuthorizePage({ origin, params }: AuthorizePageProps) {
 
   async function doSignIn() {
     setStatus("Generating authentication options...");
-
     const { startAuthentication } = await import(
       "https://esm.sh/@simplewebauthn/browser@13"
     );
-
     const optRes = await fetch(`${origin}/webauthn/authenticate/options`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
     const optData = await optRes.json();
-    if (!optRes.ok) {
-      setError(optData.error);
-      setStatus("");
-      return;
-    }
+    if (!optRes.ok) { setError(optData.error); setStatus(""); return; }
 
     setStatus("Touch your authenticator...");
-    const assertResp = await startAuthentication({
-      optionsJSON: optData.options,
-    });
+    const assertResp = await startAuthentication({ optionsJSON: optData.options });
 
     setStatus("Verifying...");
     const verRes = await fetch(`${origin}/webauthn/authenticate/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challengeId: optData.challengeId,
-        response: assertResp,
-      }),
+      body: JSON.stringify({ challengeId: optData.challengeId, response: assertResp }),
     });
     const verData = await verRes.json();
-    if (!verRes.ok || !verData.verified) {
-      setError(verData.error || "Authentication failed");
-      setStatus("");
-      return;
-    }
+    if (!verRes.ok || !verData.verified) { setError(verData.error || "Authentication failed"); setStatus(""); return; }
 
     setSessionId(verData.sessionId);
     setStep("consent");
     setStatus("");
-    loadRoomPicker(verData.sessionId);
+    loadRooms(verData.sessionId);
   }
 
   async function doRegister() {
-    const usernameInput = (
-      document.getElementById("username") as HTMLInputElement
-    )?.value?.trim();
-    if (!usernameInput) {
-      setError("Username required");
-      return;
-    }
+    const usernameInput = (document.getElementById("username") as HTMLInputElement)?.value?.trim();
+    if (!usernameInput) { setError("Username required"); return; }
 
     setStatus("Generating passkey options...");
-
     const { startRegistration } = await import(
       "https://esm.sh/@simplewebauthn/browser@13"
     );
-
     const optRes = await fetch(`${origin}/webauthn/register/options`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: usernameInput }),
     });
     const optData = await optRes.json();
-    if (!optRes.ok) {
-      setError(optData.error);
-      setStatus("");
-      return;
-    }
+    if (!optRes.ok) { setError(optData.error); setStatus(""); return; }
 
     setStatus("Touch your authenticator...");
-    const attResp = await startRegistration({
-      optionsJSON: optData.options,
-    });
+    const attResp = await startRegistration({ optionsJSON: optData.options });
 
     setStatus("Verifying...");
     const verRes = await fetch(`${origin}/webauthn/register/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        challengeId: optData.challengeId,
-        userId: optData.userId,
-        username: optData.username,
-        response: attResp,
+        challengeId: optData.challengeId, userId: optData.userId,
+        username: optData.username, response: attResp,
       }),
     });
     const verData = await verRes.json();
-    if (!verRes.ok || !verData.verified) {
-      setError(verData.error || "Registration failed");
-      setStatus("");
-      return;
-    }
+    if (!verRes.ok || !verData.verified) { setError(verData.error || "Registration failed"); setStatus(""); return; }
 
     setSessionId(verData.sessionId);
     setStep("consent");
     setStatus("");
-    loadRoomPicker(verData.sessionId);
+    loadRooms(verData.sessionId);
   }
 
-  async function loadRoomPicker(sid: string) {
+  async function loadRooms(sid: string) {
     try {
-      const res = await fetch(`${origin}/manage/api/vault`, {
+      const res = await fetch(`${origin}/manage/api/rooms`, {
         headers: { "X-Session-Id": sid },
       });
       if (!res.ok) return;
       const data = await res.json();
-      if (!data.entries || data.entries.length === 0) return;
-
-      const seen: Record<string, RoomOption> = {};
-      for (const e of data.entries) {
-        if (!seen[e.room_id]) {
-          seen[e.room_id] = {
-            vaultId: e.id,
-            roomId: e.room_id,
-            isDefault: e.is_default,
-          };
-        }
-        if (e.is_default) seen[e.room_id].isDefault = true;
+      if (!data.rooms) return;
+      setRooms(data.rooms);
+      // Default: all rooms selected with full access
+      const initial: Record<string, RoomSelection> = {};
+      for (const r of data.rooms) {
+        initial[r.room_id] = { selected: true, level: "full" };
       }
-      const roomList = Object.values(seen);
-      setRooms(roomList);
+      setSelections(initial);
+    } catch { /* silent — rooms are optional for new users */ }
+  }
 
-      const defaultRoom = roomList.find((r) => r.isDefault);
-      if (defaultRoom) setSelectedRoom(defaultRoom.vaultId);
-    } catch {
-      // Silently fail — picker is optional
+  function toggleRoom(roomId: string) {
+    setSelections(prev => ({
+      ...prev,
+      [roomId]: { ...prev[roomId], selected: !prev[roomId]?.selected },
+    }));
+  }
+
+  function setRoomLevel(roomId: string, level: RoomScopeLevel) {
+    setSelections(prev => ({
+      ...prev,
+      [roomId]: { ...prev[roomId], level },
+    }));
+  }
+
+  function buildScopeString(): string {
+    const parts: string[] = [];
+    for (const [roomId, sel] of Object.entries(selections)) {
+      if (!sel.selected) continue;
+      if (sel.level === "observe") parts.push(`rooms:${roomId}:observe`);
+      else parts.push(`rooms:${roomId}`);
     }
+    if (canCreate) parts.push("create_rooms");
+    // If no rooms selected and no legacy scope, add the legacy scope for compat
+    if (parts.length === 0 || (parts.length === 1 && parts[0] === "create_rooms")) {
+      parts.unshift("sync:rooms");
+    }
+    return parts.join(" ");
   }
 
   async function allow() {
-    // Set default room if selected
-    if (selectedRoom) {
-      await fetch(`${origin}/manage/api/vault/${selectedRoom}/default`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Session-Id": sessionId || "",
-        },
-      });
-    }
-
+    const scope = buildScopeString();
     const res = await fetch(`${origin}/oauth/consent`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -311,7 +348,7 @@ export function AuthorizePage({ origin, params }: AuthorizePageProps) {
         redirectUri: params.redirectUri,
         codeChallenge: params.codeChallenge,
         codeChallengeMethod: params.codeChallengeMethod,
-        scope: params.scope,
+        scope,
         state: params.state,
         resource: params.resource,
       }),
@@ -319,6 +356,8 @@ export function AuthorizePage({ origin, params }: AuthorizePageProps) {
     const data = await res.json();
     if (data.redirect) {
       window.location.href = data.redirect;
+    } else if (data.error) {
+      setError(data.error);
     }
   }
 
@@ -329,36 +368,24 @@ export function AuthorizePage({ origin, params }: AuthorizePageProps) {
     window.location.href = redirect.toString();
   }
 
+  const selectedCount = Object.values(selections).filter(s => s.selected).length;
+
   return (
     <PageWrapper>
       <Container>
         {step === "auth" && (
           <Card>
-            <Title>
-              sync<TitleDim>·mcp</TitleDim>
-            </Title>
+            <Title>sync<TitleDim>·mcp</TitleDim></Title>
             <Subtitle>
               Sign in with a passkey to grant{" "}
               <strong>{params.clientName}</strong> access to your sync rooms.
             </Subtitle>
 
             <ModeToggle>
-              <Tab
-                $active={mode === "signin"}
-                onClick={() => {
-                  setMode("signin");
-                  clearStatus();
-                }}
-              >
+              <Tab $active={mode === "signin"} onClick={() => { setMode("signin"); clearStatus(); }}>
                 Sign in
               </Tab>
-              <Tab
-                $active={mode === "register"}
-                onClick={() => {
-                  setMode("register");
-                  clearStatus();
-                }}
-              >
+              <Tab $active={mode === "register"} onClick={() => { setMode("register"); clearStatus(); }}>
                 New account
               </Tab>
             </ModeToggle>
@@ -366,20 +393,13 @@ export function AuthorizePage({ origin, params }: AuthorizePageProps) {
             {mode === "register" && (
               <div>
                 <Label htmlFor="username">Username</Label>
-                <Input
-                  type="text"
-                  id="username"
-                  placeholder="Choose a username"
-                  maxLength={64}
-                  autoComplete="username webauthn"
-                />
+                <Input type="text" id="username" placeholder="Choose a username"
+                  maxLength={64} autoComplete="username webauthn" />
               </div>
             )}
 
             <PrimaryButton onClick={doAuth}>
-              {mode === "register"
-                ? "Create account with passkey"
-                : "Sign in with passkey"}
+              {mode === "register" ? "Create account with passkey" : "Sign in with passkey"}
             </PrimaryButton>
 
             {status && <StatusText>{status}</StatusText>}
@@ -389,45 +409,68 @@ export function AuthorizePage({ origin, params }: AuthorizePageProps) {
 
         {step === "consent" && (
           <Card>
-            <Title>
-              sync<TitleDim>·mcp</TitleDim>
-            </Title>
+            <Title>sync<TitleDim>·mcp</TitleDim></Title>
             <Subtitle>
               Grant <strong>{params.clientName}</strong> access?
             </Subtitle>
 
-            <ScopeBox>
-              <p>
-                Scope: <code>{params.scope}</code>
-              </p>
-              <ul>
-                <li>Read room context and state</li>
-                <li>Invoke actions and send messages</li>
-                <li>Manage your token vault</li>
-              </ul>
-            </ScopeBox>
+            <ScopeSection>
+              {rooms.length > 0 ? (
+                <>
+                  <SectionLabel>Select rooms to grant access:</SectionLabel>
+                  {rooms.map(r => {
+                    const sel = selections[r.room_id];
+                    const agentCount = r.agents?.length ?? 0;
+                    const roleCount = Object.keys(r.roles ?? {}).length;
+                    return (
+                      <RoomRow key={r.room_id} $selected={sel?.selected}
+                        onClick={() => toggleRoom(r.room_id)}>
+                        <RoomCheck type="checkbox" checked={sel?.selected ?? false}
+                          onChange={() => toggleRoom(r.room_id)}
+                          onClick={e => e.stopPropagation()} />
+                        <RoomInfo>
+                          <RoomName>{r.label ?? r.room_id}</RoomName>
+                          <RoomMeta>[{r.access}]</RoomMeta>
+                          {(agentCount > 0 || roleCount > 0) && (
+                            <RoomDetail>
+                              {agentCount > 0 && `${agentCount} agent${agentCount > 1 ? "s" : ""}`}
+                              {agentCount > 0 && roleCount > 0 && " · "}
+                              {roleCount > 0 && `${roleCount} role${roleCount > 1 ? "s" : ""}`}
+                            </RoomDetail>
+                          )}
+                        </RoomInfo>
+                        {sel?.selected && (
+                          <ScopeSelect value={sel.level}
+                            onChange={e => { e.stopPropagation(); setRoomLevel(r.room_id, e.target.value as RoomScopeLevel); }}
+                            onClick={e => e.stopPropagation()}>
+                            <option value="full">Full access</option>
+                            <option value="observe">Observe only</option>
+                          </ScopeSelect>
+                        )}
+                      </RoomRow>
+                    );
+                  })}
+                </>
+              ) : (
+                <EmptyState>
+                  No rooms yet. The client can create rooms on your behalf.
+                </EmptyState>
+              )}
 
-            {rooms.length > 0 && (
-              <RoomPicker>
-                <PickerLabel>Active room for this client:</PickerLabel>
-                <RoomSelect
-                  value={selectedRoom}
-                  onChange={(e) => setSelectedRoom(e.target.value)}
-                >
-                  <option value="">All rooms (vault default)</option>
-                  {rooms.map((r) => (
-                    <option key={r.vaultId} value={r.vaultId}>
-                      {r.roomId}
-                      {r.isDefault ? " (current default)" : ""}
-                    </option>
-                  ))}
-                </RoomSelect>
-                <HintText>
-                  Sets your default room. The client will use this room when no
-                  room is specified.
-                </HintText>
-              </RoomPicker>
-            )}
+              <OptionRow style={{ marginTop: "0.75rem" }}>
+                <CheckBox type="checkbox" checked={canCreate}
+                  onChange={e => setCanCreate(e.target.checked)} />
+                Allow creating new rooms
+              </OptionRow>
+
+              <HintText>
+                {selectedCount > 0
+                  ? `${selectedCount} room${selectedCount > 1 ? "s" : ""} selected. The client can observe, embody agents, and invoke actions in granted rooms.`
+                  : "No rooms selected. The client will only be able to create new rooms."}
+              </HintText>
+            </ScopeSection>
+
+            {error && <ErrorText>{error}</ErrorText>}
 
             <ButtonRow>
               <SecondaryButton onClick={deny}>Deny</SecondaryButton>

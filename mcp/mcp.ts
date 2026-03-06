@@ -1,5 +1,5 @@
 /**
- * main.ts — sync-mcp HTTP router + MCP protocol handler
+ * mcp.ts — sync-mcp HTTP router + MCP protocol handler
  *
  * Routes:
  *   POST /mcp                                  — MCP JSON-RPC (requires OAuth)
@@ -24,7 +24,13 @@
  *   POST /recover/register/verify               — WebAuthn reg verify + consume token
  */
 
-import { cleanupExpired, ensureSchema, validateAccessToken } from "./db.ts";
+import {
+  cleanupExpired, ensureSchema, validateAccessToken,
+  getUserSession, createUserSession, getUserRoom, getEmbodiment,
+  vaultGetForRoom, parseScope, checkRoomInScope,
+  type ParsedScope,
+} from "./db.ts";
+import * as db from "./db.ts";
 import {
   handleASMetadata,
   handleAuthOptions,
@@ -46,12 +52,17 @@ import {
   resolveAdminToken,
   resolveToken,
 } from "./auth.tsx";
+import {
+  resolveAuthFromToken,
+  resolveAgentAuth,
+  type AuthResult,
+} from "../auth.ts";
 import { type ToolContext, TOOLS } from "./tools.ts";
 
 // ─── Configuration ───────────────────────────────────────────────
 
 const SERVER_NAME = "sync-mcp-server";
-const SERVER_VERSION = "2.0.0";
+const SERVER_VERSION = "3.0.0";
 const PROTOCOL_VERSION = "2025-03-26";
 
 // ─── Schema init (runs once per cold start) ──────────────────────
@@ -63,6 +74,8 @@ async function initSchema() {
     schemaReady = true;
     // Background cleanup
     cleanupExpired().catch(() => {});
+    // One-time vault → user_rooms migration
+    db.migrateVaultToUserRooms().catch(() => {});
   }
 }
 
@@ -169,9 +182,16 @@ async function handleRpc(
   return rpcError(id, -32601, `Method not found: ${method}`);
 }
 
-// ─── Auth extraction ─────────────────────────────────────────────
+// ─── Session extraction (replaces extractUserId) ─────────────────
 
-async function extractUserId(req: Request): Promise<string | null> {
+interface SessionInfo {
+  userId: string;
+  clientId: string;
+  tokenHash: string;
+  scope: ParsedScope;
+}
+
+async function extractSession(req: Request): Promise<SessionInfo | null> {
   const authHeader = req.headers.get("authorization");
   if (!authHeader?.startsWith("Bearer ")) return null;
 
@@ -183,7 +203,41 @@ async function extractUserId(req: Request): Promise<string | null> {
   ) return null;
 
   const valid = await validateAccessToken(token);
-  return valid?.userId ?? null;
+  if (!valid) return null;
+
+  // Compute token hash for session lookup
+  const tokenHash = await db.sha256(token);
+
+  // Look up or lazily create user session row
+  let session = await getUserSession(tokenHash);
+  if (!session) {
+    try {
+      await createUserSession({
+        tokenHash,
+        userId: valid.userId,
+        clientId: valid.clientId,
+        scope: valid.scope ?? "sync:rooms",
+        expiresAt: valid.expiresAt,
+      });
+      session = await getUserSession(tokenHash);
+    } catch (_) { /* race condition — another call created it */ }
+    if (!session) {
+      // Fallback: return minimal info without session row
+      return {
+        userId: valid.userId,
+        clientId: valid.clientId,
+        tokenHash,
+        scope: parseScope(valid.scope ?? "sync:rooms"),
+      };
+    }
+  }
+
+  return {
+    userId: session.userId,
+    clientId: session.clientId,
+    tokenHash: session.tokenHash,
+    scope: parseScope(session.scope),
+  };
 }
 
 // ─── 401 Challenge ───────────────────────────────────────────────
@@ -302,11 +356,11 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
 
   // ── Vault API (requires OAuth) ──
   if (path.startsWith("/vault")) {
-    const userId = await extractUserId(req);
-    if (!userId) {
+    const session = await extractSession(req);
+    if (!session) {
       return unauthorizedResponse(req);
     }
-    return handleVault(req, userId);
+    return handleVault(req, session.userId);
   }
 
   // ── MCP: DELETE (session termination, no-op for stateless) ──
@@ -341,18 +395,76 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
   // ── MCP: POST (JSON-RPC — requires OAuth) ──
   if (req.method === "POST" && (path === "/mcp" || path === "/")) {
     // Require OAuth Bearer token
-    const userId = await extractUserId(req);
-    if (!userId) {
-      // Return 401 with WWW-Authenticate to trigger MCP OAuth discovery
+    const session = await extractSession(req);
+    if (!session) {
       return unauthorizedResponse(req);
     }
 
-    // Build tool context with authenticated user
+    // Build tool context with session-aware resolution
     const ctx: ToolContext = {
-      userId,
+      userId: session.userId,
+      clientId: session.clientId,
+      sessionHash: session.tokenHash,
+      scope: session.scope,
+
+      // New: resolve auth for a room accounting for embodiment
+      async resolveForRoom(roomId: string) {
+        // 1. Check scope allows this room
+        const scopeCheck = checkRoomInScope(session.scope, roomId, "observe");
+        if (!scopeCheck.allowed) return null;
+
+        // 2. Check user_rooms for access level
+        const userRoom = await getUserRoom(session.userId, roomId);
+        if (!userRoom) {
+          // Fallback: check vault for legacy tokens
+          const vaultEntries = await vaultGetForRoom(session.userId, roomId);
+          if (vaultEntries.length === 0) return null;
+          const best = vaultEntries.find(e => e.tokenType === "agent")
+                    ?? vaultEntries.find(e => e.tokenType === "room")
+                    ?? vaultEntries[0];
+          const auth = await resolveAuthFromToken(best.token, roomId);
+          if (auth instanceof Response) return null;
+          return { auth, agentId: auth.agentId };
+        }
+
+        // 3. Check for active embodiment in this room
+        const embodiedAgentId = await getEmbodiment(
+          session.tokenHash, roomId,
+        );
+        if (embodiedAgentId) {
+          const agentAuth = await resolveAgentAuth(roomId, embodiedAgentId);
+          if (agentAuth) return { auth: agentAuth, agentId: embodiedAgentId };
+          // Agent no longer exists — clean up stale embodiment
+          await db.removeEmbodiment(session.tokenHash, roomId);
+        }
+
+        // 4. Not embodied — return view-level access
+        return {
+          auth: {
+            authenticated: true,
+            kind: "view" as const,
+            agentId: null,
+            roomId,
+            grants: [],
+          },
+          agentId: null,
+        };
+      },
+
+      // Legacy resolver (backward compat)
       resolveToken: (room?: string, token?: string) =>
-        resolveToken(userId, room, token),
-      resolveAdminToken: (room: string) => resolveAdminToken(userId, room),
+        resolveToken(session.userId, room, token),
+
+      // Admin auth for privilege escalation
+      async resolveAdminAuth(roomId: string) {
+        const userRoom = await getUserRoom(session.userId, roomId);
+        if (!userRoom || userRoom.access !== "owner") return null;
+        const adminToken = await resolveAdminToken(session.userId, roomId);
+        if (!adminToken) return null;
+        const auth = await resolveAuthFromToken(adminToken, roomId);
+        if (auth instanceof Response) return null;
+        return auth;
+      },
     };
 
     let body: unknown;
