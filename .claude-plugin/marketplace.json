@@ -1,0 +1,28 @@
+{
+  "name": "sync",
+  "owner": {
+    "name": "Anthropic Research",
+    "email": "research@anthropic.com"
+  },
+  "metadata": {
+    "description": "Multi-agent coordination platform for Claude",
+    "version": "6.0.0"
+  },
+  "plugins": [
+    {
+      "name": "sync",
+      "source": "./",
+      "description": "Multi-agent coordination platform with dual-layer skill + MCP integration",
+      "version": "6.0.0",
+      "author": {
+        "name": "Anthropic Research",
+        "url": "https://anthropic.com"
+      },
+      "homepage": "https://sync.parc.land",
+      "repository": "https://github.com/christopherdebeer/sync.parc.land",
+      "license": "MIT",
+      "keywords": ["multi-agent", "coordination", "state-management", "cel", "collaboration"],
+      "category": "productivity"
+    }
+  ]
+}
