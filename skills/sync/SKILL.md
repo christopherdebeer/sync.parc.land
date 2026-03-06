@@ -1,5 +1,5 @@
 ---
-name: api
+name: sync
 description: Knowledge about the sync.parc.land coordination API. Use when working with multi-agent systems, room coordination, or when the user mentions sync.parc.land.
 ---
 
