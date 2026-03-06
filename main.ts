@@ -8,6 +8,8 @@ import {
   assertIdentity, checkScopeAuthority, touchAgent, type AuthResult,
 } from "./auth.ts";
 import { evaluate } from "npm:@marcbachmann/cel-js";
+import { handleMcpRequest } from "./mcp/mcp.ts";
+import { renderLandingPage, renderDashboardPage, renderDocPage } from "./frontend/pages.tsx";
 
 const README_URL = new URL("./README.md", import.meta.url);
 const README = await fetch(README_URL).then((r) => r.text());
@@ -16,8 +18,7 @@ for (const name of ["api.md", "cel.md", "examples.md", "surfaces.md", "v6.md", "
   const refUrl = new URL(`./reference/${name}`, import.meta.url);
   REFERENCE_FILES[name] = await fetch(refUrl).then((r) => r.text());
 }
-const FRONTEND_HTML_URL = new URL("./frontend/index.html", import.meta.url);
-const FRONTEND_HTML = await fetch(FRONTEND_HTML_URL).then((r) => r.text());
+// Frontend HTML no longer loaded at module scope — SSR renders each page directly
 
 /** Standard library — canonical action definitions agents can register directly.
  *  Returned by help({ key: "standard_library" }) as a JSON array.
@@ -491,7 +492,7 @@ function deepMerge(target: any, source: any): any {
 
 // ============ Room handlers ============
 
-async function createRoom(body: any) {
+export async function createRoom(body: any) {
   const id = body.id ?? crypto.randomUUID();
   const meta = JSON.stringify(body.meta ?? {});
   const token = generateToken("room");
@@ -540,7 +541,7 @@ async function getRoom(roomId: string) {
   return json(room);
 }
 
-async function listRooms(req: Request) {
+export async function listRooms(req: Request) {
   const header = req.headers.get("Authorization");
   if (!header || !header.startsWith("Bearer ")) {
     return json({ error: "authentication_required", message: "include Authorization: Bearer <token> to list your rooms" }, 401);
@@ -582,7 +583,7 @@ async function listRooms(req: Request) {
 
 // ============ Agent handlers ============
 
-async function joinRoom(roomId: string, body: any, req: Request) {
+export async function joinRoom(roomId: string, body: any, req: Request) {
   const id = body.id ?? crypto.randomUUID();
   const name = body.name ?? "anonymous";
   const role = body.role ?? "agent";
@@ -1285,7 +1286,7 @@ async function computeContestedTargets(roomId: string): Promise<Record<string, s
   return contested;
 }
 
-async function registerAction(roomId: string, body: any, auth: AuthResult) {
+export async function registerAction(roomId: string, body: any, auth: AuthResult) {
   const id = body.id;
   if (!id) return json({ error: "id is required" }, 400);
   const scope = body.scope ?? "_shared";
@@ -1417,7 +1418,7 @@ async function getAction(roomId: string, actionId: string) {
   return json(formatAction(row));
 }
 
-async function deleteAction(roomId: string, actionId: string, auth: AuthResult) {
+export async function deleteAction(roomId: string, actionId: string, auth: AuthResult) {
   const existing = await sqlite.execute({ sql: `SELECT scope FROM actions WHERE id = ? AND room_id = ?`, args: [actionId, roomId] });
   if (existing.rows.length === 0) return json({ error: "action not found" }, 404);
   const scope = existing.rows[0][0] ?? "_shared";
@@ -1430,7 +1431,7 @@ async function deleteAction(roomId: string, actionId: string, auth: AuthResult) 
   return json({ deleted: true, id: actionId });
 }
 
-async function invokeAction(roomId: string, actionId: string, body: any, auth: AuthResult) {
+export async function invokeAction(roomId: string, actionId: string, body: any, auth: AuthResult) {
   // Built-in actions: dispatch to handler
   if (actionId.startsWith("_") && BUILTIN_ACTIONS[actionId]) {
     const response = await invokeBuiltinAction(roomId, actionId, body, auth);
@@ -1754,7 +1755,7 @@ async function invokeAction(roomId: string, actionId: string, body: any, auth: A
 
 // ============ View handlers ============
 
-async function registerView(roomId: string, body: any, auth: AuthResult) {
+export async function registerView(roomId: string, body: any, auth: AuthResult) {
   const id = body.id;
   if (!id) return json({ error: "id is required" }, 400);
   if (!body.expr) return json({ error: "expr is required" }, 400);
@@ -1890,7 +1891,7 @@ async function getView(roomId: string, viewId: string, auth: AuthResult) {
   });
 }
 
-async function deleteView(roomId: string, viewId: string, auth: AuthResult) {
+export async function deleteView(roomId: string, viewId: string, auth: AuthResult) {
   const existing = await sqlite.execute({ sql: `SELECT scope FROM views WHERE id = ? AND room_id = ?`, args: [viewId, roomId] });
   if (existing.rows.length === 0) return json({ error: "view not found" }, 404);
   const scope = existing.rows[0][0] ?? "_shared";
@@ -2030,7 +2031,7 @@ function parseContextRequest(url: URL): ContextRequest {
  *
  * Returns a self-describing envelope with a `_context` section that tells the caller
  * what was included, what was elided, and how to expand elided sections. */
-async function buildExpandedContext(roomId: string, auth: AuthResult, req: ContextRequest = {}): Promise<Record<string, any>> {
+export async function buildExpandedContext(roomId: string, auth: AuthResult, req: ContextRequest = {}): Promise<Record<string, any>> {
   const depth = req.depth ?? "lean";
   const includeActions = req.actions !== false;
   const includeMessages = req.messages !== false;
@@ -2297,7 +2298,7 @@ async function buildExpandedContext(roomId: string, auth: AuthResult, req: Conte
   return result;
 }
 
-async function invokeBuiltinAction(roomId: string, actionId: string, body: any, auth: AuthResult): Promise<Response> {
+export async function invokeBuiltinAction(roomId: string, actionId: string, body: any, auth: AuthResult): Promise<Response> {
   const agent = body.agent ?? auth.agentId;
   const params = body.params ?? {};
   touchAgent(roomId, agent);
@@ -2589,7 +2590,7 @@ async function rotateViewToken(roomId: string) {
 
 // ============ CEL eval endpoint ============
 
-async function evalExpression(roomId: string, body: any, auth: AuthResult) {
+export async function evalExpression(roomId: string, body: any, auth: AuthResult) {
   const expr = body.expr;
   if (!expr || typeof expr !== "string") return json({ error: "expr string is required" }, 400);
   touchAgent(roomId, auth.agentId);
@@ -2733,6 +2734,20 @@ async function route(req: Request, _url?: URL): Promise<Response> {
     });
   }
 
+  // ── MCP / OAuth / WebAuthn / Management — delegate to MCP handler ──
+  const p = url.pathname;
+  if (
+    p === "/mcp" ||
+    p.startsWith("/oauth/") ||
+    p.startsWith("/webauthn/") ||
+    p.startsWith("/manage") ||
+    p.startsWith("/recover") ||
+    p.startsWith("/vault") ||
+    (p.startsWith("/.well-known/oauth"))
+  ) {
+    return handleMcpRequest(req);
+  }
+
   // POST /rooms
   if (method === "POST" && parts[0] === "rooms" && parts.length === 1) {
     const body = await parseBody(req);
@@ -2746,14 +2761,13 @@ async function route(req: Request, _url?: URL): Promise<Response> {
 
   const roomId = parts[1];
   if (!roomId || parts[0] !== "rooms") {
-    // Root — serve the React SPA (handles both landing and dashboard)
+    // Root — SSR per-page (replaces SPA shell)
     if (url.pathname === "/" || url.pathname === "") {
-      return new Response(FRONTEND_HTML, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-cache, no-store, must-revalidate",
-        },
-      });
+      const roomId = url.searchParams.get("room");
+      const docId = url.searchParams.get("doc");
+      if (roomId) return renderDashboardPage(roomId);
+      if (docId) return renderDocPage(docId);
+      return renderLandingPage();
     }
     // Frontend module proxy — redirect to esm.town for transpilation
     if (method === "GET" && url.pathname.startsWith("/frontend/")) {
@@ -2768,6 +2782,34 @@ async function route(req: Request, _url?: URL): Promise<Response> {
           "Cache-Control": "no-cache, no-store, must-revalidate",
         },
       });
+    }
+    // Static assets — /static/* and well-known shortcuts (/favicon.ico, /favicon.svg)
+    if (method === "GET" && (url.pathname.startsWith("/static/") || url.pathname === "/favicon.ico" || url.pathname === "/favicon.svg")) {
+      const filePath = url.pathname === "/favicon.ico" ? "static/favicon.ico"
+                     : url.pathname === "/favicon.svg" ? "static/favicon.svg"
+                     : url.pathname.slice(1); // "static/whatever.ext"
+      try {
+        const fileUrl = new URL(`./${filePath}`, import.meta.url);
+        const res = await fetch(fileUrl);
+        if (!res.ok) return json({ error: "not found" }, 404);
+        const body = await res.arrayBuffer();
+        const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+        const mimeTypes: Record<string, string> = {
+          ico: "image/x-icon", svg: "image/svg+xml", png: "image/png",
+          jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+          css: "text/css", js: "application/javascript", json: "application/json",
+          woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf",
+          txt: "text/plain", xml: "application/xml",
+        };
+        return new Response(body, {
+          headers: {
+            "Content-Type": mimeTypes[ext] || "application/octet-stream",
+            "Cache-Control": "public, max-age=86400",
+          },
+        });
+      } catch {
+        return json({ error: "not found" }, 404);
+      }
     }
     // SKILL.md — orchestrator skill (README content)
     if (method === "GET" && (url.pathname === "/SKILL.md" || url.pathname === "/skill.md")) {

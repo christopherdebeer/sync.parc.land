@@ -204,4 +204,98 @@ export async function migrate() {
 
   // views.render_json: render hint for surfaces-as-views
   await addColumn("views", "render_json", "TEXT");
+
+  // ============ MCP auth tables (smcp_ prefix) ============
+  // These support the OAuth 2.1 + WebAuthn authentication layer
+  // that sync-mcp provides for MCP clients.
+  await sqlite.batch([
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_users (
+      id TEXT PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_credentials (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES smcp_users(id),
+      public_key BLOB NOT NULL,
+      counter INTEGER NOT NULL DEFAULT 0,
+      transports TEXT,
+      device_type TEXT,
+      backed_up INTEGER DEFAULT 0,
+      rp_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_challenges (
+      id TEXT PRIMARY KEY,
+      challenge TEXT NOT NULL,
+      user_id TEXT,
+      type TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_oauth_clients (
+      client_id TEXT PRIMARY KEY,
+      client_secret TEXT,
+      redirect_uris TEXT NOT NULL,
+      client_name TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_auth_codes (
+      code TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      code_challenge TEXT NOT NULL,
+      code_challenge_method TEXT NOT NULL DEFAULT 'S256',
+      scope TEXT,
+      resource TEXT,
+      expires_at TEXT NOT NULL,
+      used INTEGER DEFAULT 0
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_access_tokens (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      scope TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_refresh_tokens (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      scope TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_vault (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES smcp_users(id),
+      room_id TEXT NOT NULL,
+      token TEXT NOT NULL,
+      token_type TEXT NOT NULL,
+      label TEXT,
+      is_default INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      scope TEXT DEFAULT 'consent',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS smcp_recovery_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES smcp_users(id),
+      token_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`, args: [] },
+  ]);
+
+  // smcp_ column migrations (for existing installs from separate sync-mcp val)
+  await addColumn("smcp_credentials", "rp_id", "TEXT");
+  await addColumn("smcp_sessions", "scope", "TEXT DEFAULT 'consent'");
 }

@@ -1,0 +1,690 @@
+/** @jsxImportSource https://esm.sh/react@18.2.0 */
+/** ManagePage — vault, passkeys, recovery token management.
+ *
+ * Two-phase flow:
+ *   1. Sign in with passkey (WebAuthn)
+ *   2. Dashboard: passkeys, vault table, recovery tokens
+ *
+ * Server renders the sign-in form. Client hydration adds WebAuthn + dashboard.
+ */
+import { useState, useCallback } from "https://esm.sh/react@18.2.0";
+import { styled } from "../../styled.ts";
+import {
+  PageWrapper,
+  Card,
+  Title,
+  TitleDim,
+  Subtitle,
+  PrimaryButton,
+  StatusText,
+  ErrorText,
+} from "../../components/mcp.tsx";
+
+export interface ManagePageProps {
+  origin: string;
+}
+
+// ─── Manage-specific styled components ───────────────────────────
+
+const ManageContainer = styled.div`
+  width: 100%;
+  max-width: 720px;
+  padding: 1rem;
+`;
+
+const ManageCard = styled.div`
+  background: var(--surface, #161b22);
+  border: 1px solid var(--border, #21262d);
+  border-radius: 12px;
+  padding: 1.5rem 2rem;
+  margin-bottom: 1rem;
+
+  @media (max-width: 600px) {
+    padding: 1rem 1.25rem;
+  }
+`;
+
+const ManageHeader = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+`;
+
+const UserBadge = styled.span`
+  font-size: 0.8rem;
+  color: #888;
+  background: var(--bg, #0d1117);
+  border: 1px solid var(--border, #21262d);
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+`;
+
+const SignOutButton = styled.button`
+  border: 1px solid var(--border, #21262d);
+  background: none;
+  color: #888;
+  padding: 0.3rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+  &:hover {
+    border-color: var(--red, #f85149);
+    color: var(--red, #f85149);
+  }
+`;
+
+const SectionTitle = styled.div`
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #666;
+  margin-bottom: 0.75rem;
+`;
+
+const PasskeyList = styled.div`
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+`;
+
+const PasskeyChip = styled.span`
+  font-size: 0.75rem;
+  background: var(--bg, #0d1117);
+  border: 1px solid var(--border, #21262d);
+  border-radius: 5px;
+  padding: 0.2rem 0.6rem;
+  color: #888;
+  font-family: "SF Mono", "Fira Code", monospace;
+`;
+
+const SyncedBadge = styled.span`
+  color: var(--green, #3fb950);
+  margin-left: 0.3rem;
+  font-size: 0.65rem;
+`;
+
+const EmptyState = styled.div`
+  text-align: center;
+  padding: 2rem;
+  color: #666;
+  font-size: 0.9rem;
+`;
+
+const VaultTable = styled.table`
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+
+  @media (max-width: 600px) {
+    font-size: 0.78rem;
+  }
+`;
+
+const Th = styled.th`
+  text-align: left;
+  color: #666;
+  font-weight: 500;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.5rem 0.5rem;
+  border-bottom: 1px solid var(--border, #21262d);
+
+  @media (max-width: 600px) {
+    padding: 0.4rem 0.3rem;
+  }
+`;
+
+const Td = styled.td<{ $actions?: boolean; $hideMobile?: boolean }>`
+  padding: 0.6rem 0.5rem;
+  border-bottom: 1px solid #1a1a25;
+  vertical-align: middle;
+  ${({ $actions }) => $actions && `white-space: nowrap; text-align: right;`}
+  ${({ $hideMobile }) =>
+    $hideMobile &&
+    `@media (max-width: 600px) { display: none; }`}
+
+  @media (max-width: 600px) {
+    padding: 0.4rem 0.3rem;
+  }
+`;
+
+const Tr = styled.tr`
+  &:last-child td {
+    border-bottom: none;
+  }
+  &:hover td {
+    background: #1a1a25;
+  }
+`;
+
+const TokenType = styled.span<{ $type: string }>`
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  ${({ $type }) =>
+    $type === "room"
+      ? `background: #1a2a1a; color: #6c6;`
+      : $type === "agent"
+        ? `background: #2a2a1a; color: #cc6;`
+        : `background: #1a1a2a; color: #88f;`}
+`;
+
+const DefaultBadge = styled.span`
+  font-size: 0.65rem;
+  color: var(--accent, #58a6ff);
+  border: 1px solid rgba(88, 166, 255, 0.2);
+  border-radius: 3px;
+  padding: 0.1rem 0.35rem;
+  margin-left: 0.4rem;
+`;
+
+const RoomId = styled.span`
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.82rem;
+  color: var(--fg, #c9d1d9);
+`;
+
+const LabelText = styled.span`
+  color: #999;
+  font-size: 0.82rem;
+`;
+
+const ActionBtn = styled.button<{ $variant?: string }>`
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  transition: all 0.15s;
+  font-family: inherit;
+  ${({ $variant }) =>
+    $variant === "revoke"
+      ? `color: var(--red, #f85149); &:hover { background: #2a1a1a; }`
+      : $variant === "default"
+        ? `color: var(--accent, #58a6ff); &:hover { background: #1a1a2a; }`
+        : $variant === "dash"
+          ? `color: var(--purple, #bc8cff); &:hover { background: #1a1a2a; }`
+          : `color: #888; &:hover { background: #2a2a3a; }`}
+`;
+
+const DashLink = styled.a`
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  transition: all 0.15s;
+  color: var(--purple, #bc8cff);
+  text-decoration: none;
+  &:hover {
+    background: #1a1a2a;
+  }
+`;
+
+const RecoveryBox = styled.div`
+  margin-top: 0.75rem;
+  background: var(--bg, #0d1117);
+  border: 1px solid var(--border, #21262d);
+  border-radius: 8px;
+  padding: 0.75rem;
+`;
+
+const RecoveryWarning = styled.p`
+  font-size: 0.78rem;
+  color: var(--yellow, #d29922);
+  margin-bottom: 0.4rem;
+`;
+
+const RecoveryInput = styled.input`
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border, #21262d);
+  border-radius: 6px;
+  background: var(--surface, #161b22);
+  color: var(--fg, #c9d1d9);
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.8rem;
+  cursor: text;
+  margin-bottom: 0.4rem;
+`;
+
+const RecoveryRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  font-size: 0.82rem;
+`;
+
+const Toast = styled.div<{ $show?: boolean }>`
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #2a2a3a;
+  color: var(--fg, #c9d1d9);
+  padding: 0.5rem 1.25rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  opacity: ${({ $show }) => ($show ? 1 : 0)};
+  transition: opacity 0.3s;
+  pointer-events: none;
+  z-index: 100;
+`;
+
+const HeaderRight = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+`;
+
+const SmallPrimary = styled(PrimaryButton)`
+  width: auto;
+  padding: 0.4rem 1rem;
+  font-size: 0.82rem;
+`;
+
+// ─── Types ───────────────────────────────────────────────────────
+
+interface Passkey {
+  id: string;
+  device_type: string;
+  backed_up: boolean;
+}
+
+interface VaultEntry {
+  id: string;
+  room_id: string;
+  token: string;
+  token_type: string;
+  label: string | null;
+  is_default: boolean;
+}
+
+interface RecoveryToken {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+  used: boolean;
+}
+
+// ─── Component ───────────────────────────────────────────────────
+
+export function ManagePage({ origin }: ManagePageProps) {
+  const [phase, setPhase] = useState<"auth" | "dashboard">("auth");
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [username, setUsername] = useState("");
+  const [passkeys, setPasskeys] = useState<Passkey[]>([]);
+  const [vault, setVault] = useState<VaultEntry[]>([]);
+  const [recoveryTokens, setRecoveryTokens] = useState<RecoveryToken[]>([]);
+  const [newRecoveryToken, setNewRecoveryToken] = useState<string | null>(null);
+  const [toastMsg, setToastMsg] = useState("");
+  const [toastVisible, setToastVisible] = useState(false);
+
+  function toast(msg: string) {
+    setToastMsg(msg);
+    setToastVisible(true);
+    setTimeout(() => setToastVisible(false), 2000);
+  }
+
+  async function api(
+    method: string,
+    path: string,
+    body?: any,
+    sid?: string,
+  ): Promise<any> {
+    const opts: RequestInit = {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Session-Id": sid || sessionId || "",
+      },
+    };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(`${origin}/manage/api${path}`, opts);
+    if (res.status === 401) {
+      signOut();
+      return null;
+    }
+    return res.json();
+  }
+
+  async function doSignIn() {
+    setError("");
+    setStatus("Generating authentication options...");
+    try {
+      const { startAuthentication } = await import(
+        "https://esm.sh/@simplewebauthn/browser@13"
+      );
+
+      const optRes = await fetch(`${origin}/webauthn/authenticate/options`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const optData = await optRes.json();
+      if (!optRes.ok) {
+        setError(optData.error);
+        setStatus("");
+        return;
+      }
+
+      setStatus("Touch your authenticator...");
+      const assertResp = await startAuthentication({
+        optionsJSON: optData.options,
+      });
+
+      setStatus("Verifying...");
+      const verRes = await fetch(`${origin}/webauthn/authenticate/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: optData.challengeId,
+          response: assertResp,
+        }),
+      });
+      const verData = await verRes.json();
+      if (!verRes.ok || !verData.verified) {
+        setError(verData.error || "Authentication failed");
+        setStatus("");
+        return;
+      }
+
+      setSessionId(verData.sessionId);
+      setPhase("dashboard");
+      setStatus("");
+      await loadDashboard(verData.sessionId);
+    } catch (err: any) {
+      setError(err.message || "Authentication failed");
+      setStatus("");
+    }
+  }
+
+  async function loadDashboard(sid?: string) {
+    const me = await api("GET", "/me", undefined, sid);
+    if (!me) return;
+    setUsername(me.user?.username ?? "Unknown");
+    setPasskeys(me.passkeys ?? []);
+    await loadVault(sid);
+    await loadRecovery(sid);
+  }
+
+  async function loadVault(sid?: string) {
+    const data = await api("GET", "/vault", undefined, sid);
+    if (!data) return;
+    setVault(data.entries ?? []);
+  }
+
+  async function loadRecovery(sid?: string) {
+    const data = await api("GET", "/recovery", undefined, sid);
+    if (!data) return;
+    const active = (data.tokens || []).filter(
+      (t: RecoveryToken) =>
+        !t.used && new Date(t.expiresAt) > new Date(),
+    );
+    setRecoveryTokens(active);
+  }
+
+  async function copyToken(token: string) {
+    await navigator.clipboard.writeText(token);
+    toast("Token copied");
+  }
+
+  async function setDefault(id: string) {
+    await api("POST", `/vault/${id}/default`);
+    toast("Default room updated");
+    await loadVault();
+  }
+
+  async function revoke(id: string, label: string) {
+    if (!confirm(`Revoke ${label}? This cannot be undone.`)) return;
+    await api("DELETE", `/vault/${id}`);
+    toast("Token revoked");
+    await loadVault();
+  }
+
+  async function generateRecovery() {
+    const data = await api("POST", "/recovery");
+    if (!data || data.error) {
+      toast(data?.error || "Failed");
+      return;
+    }
+    setNewRecoveryToken(data.token);
+    toast("Recovery token generated");
+    await loadRecovery();
+  }
+
+  async function revokeRecovery(id: string) {
+    if (!confirm("Revoke this recovery token?")) return;
+    await api("DELETE", `/recovery/${id}`);
+    toast("Recovery token revoked");
+    await loadRecovery();
+  }
+
+  function signOut() {
+    setSessionId(null);
+    setPhase("auth");
+    setStatus("");
+    setError("");
+    setVault([]);
+    setPasskeys([]);
+    setRecoveryTokens([]);
+    setNewRecoveryToken(null);
+  }
+
+  // Group vault entries by room
+  const roomGroups: Record<string, VaultEntry[]> = {};
+  for (const e of vault) {
+    if (!roomGroups[e.room_id]) roomGroups[e.room_id] = [];
+    roomGroups[e.room_id].push(e);
+  }
+
+  const dashBase = origin.replace(/mcp\./, "");
+
+  return (
+    <PageWrapper>
+      <ManageContainer>
+        {phase === "auth" && (
+          <ManageCard>
+            <Title>
+              sync<TitleDim>·mcp</TitleDim>
+            </Title>
+            <Subtitle>
+              Sign in with your passkey to manage your sync tokens and rooms.
+            </Subtitle>
+            <PrimaryButton onClick={doSignIn}>
+              Sign in with passkey
+            </PrimaryButton>
+            {status && <StatusText>{status}</StatusText>}
+            {error && <ErrorText>{error}</ErrorText>}
+          </ManageCard>
+        )}
+
+        {phase === "dashboard" && (
+          <>
+            {/* Header + Passkeys */}
+            <ManageCard>
+              <ManageHeader>
+                <Title style={{ margin: 0 }}>
+                  sync<TitleDim>·mcp</TitleDim>
+                </Title>
+                <HeaderRight>
+                  <UserBadge>{username}</UserBadge>
+                  <SignOutButton onClick={signOut}>Sign out</SignOutButton>
+                </HeaderRight>
+              </ManageHeader>
+
+              <SectionTitle>Passkeys</SectionTitle>
+              <PasskeyList>
+                {passkeys.length > 0 ? (
+                  passkeys.map((p) => (
+                    <PasskeyChip key={p.id}>
+                      {p.id}
+                      {p.backed_up && <SyncedBadge>synced</SyncedBadge>}
+                    </PasskeyChip>
+                  ))
+                ) : (
+                  <span style={{ color: "#666", fontSize: "0.85rem" }}>
+                    No passkeys found
+                  </span>
+                )}
+              </PasskeyList>
+            </ManageCard>
+
+            {/* Vault */}
+            <ManageCard>
+              <SectionTitle>Token Vault</SectionTitle>
+              {vault.length === 0 ? (
+                <EmptyState>
+                  No tokens in vault yet.
+                  <br />
+                  Connect an MCP client to create rooms and tokens will appear
+                  here.
+                </EmptyState>
+              ) : (
+                <VaultTable>
+                  <thead>
+                    <tr>
+                      <Th>Room</Th>
+                      <Th>Type</Th>
+                      <Th style={{ display: undefined }} className="hide-mobile">
+                        Label
+                      </Th>
+                      <Th style={{ textAlign: "right" }}>Actions</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(roomGroups).map(([roomId, entries]) =>
+                      entries.map((e, i) => (
+                        <Tr key={e.id}>
+                          <Td>
+                            {i === 0 && <RoomId>{roomId}</RoomId>}
+                          </Td>
+                          <Td>
+                            <TokenType $type={e.token_type}>
+                              {e.token_type}
+                            </TokenType>
+                            {e.is_default && (
+                              <DefaultBadge>★ default</DefaultBadge>
+                            )}
+                          </Td>
+                          <Td $hideMobile>
+                            <LabelText>{e.label || ""}</LabelText>
+                          </Td>
+                          <Td $actions>
+                            <DashLink
+                              href={`${dashBase}?room=${encodeURIComponent(roomId)}#token=${encodeURIComponent(e.token)}`}
+                              target="_blank"
+                              title="Open dashboard"
+                            >
+                              dash ↗
+                            </DashLink>
+                            <ActionBtn
+                              onClick={() => copyToken(e.token)}
+                            >
+                              copy
+                            </ActionBtn>
+                            {!e.is_default && e.token_type === "room" && (
+                              <ActionBtn
+                                $variant="default"
+                                onClick={() => setDefault(e.id)}
+                                title="Set as default room"
+                              >
+                                ☆ default
+                              </ActionBtn>
+                            )}
+                            <ActionBtn
+                              $variant="revoke"
+                              onClick={() =>
+                                revoke(
+                                  e.id,
+                                  `${e.token_type} for ${roomId}`,
+                                )
+                              }
+                            >
+                              revoke
+                            </ActionBtn>
+                          </Td>
+                        </Tr>
+                      )),
+                    )}
+                  </tbody>
+                </VaultTable>
+              )}
+            </ManageCard>
+
+            {/* Recovery */}
+            <ManageCard>
+              <SectionTitle>Recovery Tokens</SectionTitle>
+              {recoveryTokens.length === 0 ? (
+                <span style={{ color: "#666", fontSize: "0.85rem" }}>
+                  No active recovery tokens.
+                </span>
+              ) : (
+                recoveryTokens.map((t) => (
+                  <RecoveryRow key={t.id}>
+                    <span style={{ color: "#888" }}>
+                      Created {t.createdAt.split("T")[0]}
+                    </span>
+                    <span style={{ color: "#666" }}>
+                      expires {t.expiresAt.split("T")[0]}
+                    </span>
+                    <ActionBtn
+                      $variant="revoke"
+                      onClick={() => revokeRecovery(t.id)}
+                    >
+                      revoke
+                    </ActionBtn>
+                  </RecoveryRow>
+                ))
+              )}
+              <div style={{ marginTop: "0.75rem" }}>
+                <SmallPrimary onClick={generateRecovery}>
+                  Generate recovery token
+                </SmallPrimary>
+              </div>
+              {newRecoveryToken && (
+                <RecoveryBox>
+                  <RecoveryWarning>
+                    Copy this token now — it will not be shown again.
+                  </RecoveryWarning>
+                  <RecoveryInput
+                    type="text"
+                    readOnly
+                    value={newRecoveryToken}
+                    onClick={(e) =>
+                      (e.target as HTMLInputElement).select()
+                    }
+                  />
+                  <ActionBtn
+                    onClick={() => {
+                      navigator.clipboard.writeText(newRecoveryToken);
+                      toast("Recovery token copied");
+                    }}
+                    style={{ fontSize: "0.82rem" }}
+                  >
+                    copy
+                  </ActionBtn>
+                </RecoveryBox>
+              )}
+            </ManageCard>
+          </>
+        )}
+
+        <Toast $show={toastVisible}>{toastMsg}</Toast>
+      </ManageContainer>
+    </PageWrapper>
+  );
+}

@@ -1,20 +1,26 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
-import { useState, useCallback, useEffect } from "https://esm.sh/react@18.2.0";
-import { styled, keyframes } from "../styled.ts";
+import { useCallback, useEffect, useState } from "https://esm.sh/react@18.2.0";
+import { keyframes, styled } from "../styled.ts";
 import { processMermaidBlocks, runMermaid } from "../mermaid.ts";
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 
 const Page = styled.div`
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: var(--lbg);
   color: var(--lfg);
   line-height: 1.6;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  a { color: var(--laccent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  a {
+    color: var(--laccent);
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
 `;
 
 const Container = styled.div`
@@ -34,6 +40,7 @@ const H1 = styled.h1`
   font-weight: 700;
   letter-spacing: -0.03em;
   margin-bottom: 0.35rem;
+
   @media (max-width: 480px) {
     font-size: 1.75rem;
   }
@@ -44,6 +51,7 @@ const Subtitle = styled.p`
   font-size: 1.15rem;
   margin-bottom: 1.5rem;
   line-height: 1.5;
+  max-width: 75%;
   @media (max-width: 480px) {
     font-size: 1.05rem;
     margin-bottom: 1.25rem;
@@ -96,7 +104,7 @@ const SkillBlock = styled.div`
   justify-content: space-between;
   gap: 0.75rem;
   margin-top: 0.75rem;
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
   font-size: 0.88rem;
   color: var(--laccent);
   word-break: break-all;
@@ -120,7 +128,10 @@ const CopyBtn = styled.button`
   white-space: nowrap;
   font-family: inherit;
   transition: all 0.15s;
-  &:hover { color: var(--lfg); border-color: var(--ldim); }
+  &:hover {
+    color: var(--lfg);
+    border-color: var(--ldim);
+  }
   @media (max-width: 480px) {
     align-self: flex-end;
     padding: 0.4rem 0.8rem;
@@ -137,7 +148,9 @@ const PromptCard = styled.div`
   margin-bottom: 0.75rem;
   cursor: pointer;
   transition: border-color 0.15s;
-  &:hover { border-color: var(--laccent); }
+  &:hover {
+    border-color: var(--laccent);
+  }
   @media (max-width: 480px) {
     padding: 0.85rem 1rem;
   }
@@ -184,17 +197,36 @@ const Prose = styled.div`
     letter-spacing: -0.01em;
     margin: 2rem 0 0.75rem;
   }
-  h3 { font-size: 1rem; font-weight: 600; margin: 1.25rem 0 0.4rem; }
+  h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 1.25rem 0 0.4rem;
+  }
 
-  p { margin: 0.5rem 0 0.9rem; }
+  p {
+    margin: 0.5rem 0 0.9rem;
+  }
 
-  a { color: var(--laccent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  a {
+    color: var(--laccent);
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
 
-  strong { color: var(--lfg); font-weight: 600; }
+  strong {
+    color: var(--lfg);
+    font-weight: 600;
+  }
 
-  ul, ol { margin: 0.5rem 0 0.9rem; padding-left: 1.5rem; }
-  li { margin: 0.3rem 0; }
+  ul, ol {
+    margin: 0.5rem 0 0.9rem;
+    padding-left: 1.5rem;
+  }
+  li {
+    margin: 0.3rem 0;
+  }
 
   pre {
     background: var(--lsurface);
@@ -206,7 +238,13 @@ const Prose = styled.div`
     margin: 0.75rem 0 1.25rem;
     line-height: 1.55;
     -webkit-overflow-scrolling: touch;
-    code { background: none; border: none; padding: 0; color: var(--lfg); font-size: inherit; }
+    code {
+      background: none;
+      border: none;
+      padding: 0;
+      color: var(--lfg);
+      font-size: inherit;
+    }
   }
 
   code {
@@ -218,18 +256,28 @@ const Prose = styled.div`
     color: var(--laccent);
   }
 
-  hr { border: none; border-top: 1px solid var(--lborder); margin: 2rem 0; }
+  hr {
+    border: none;
+    border-top: 1px solid var(--lborder);
+    margin: 2rem 0;
+  }
 
   .mermaid {
     margin: 1.25rem 0;
     text-align: center;
     overflow-x: auto;
-    svg { max-width: 100%; height: auto; }
+    svg {
+      max-width: 100%;
+      height: auto;
+    }
   }
 
   @media (max-width: 480px) {
     font-size: 0.9rem;
-    pre { padding: 0.75rem 0.9rem; font-size: 0.75rem; }
+    pre {
+      padding: 0.75rem 0.9rem;
+      font-size: 0.75rem;
+    }
   }
 `;
 
@@ -275,11 +323,16 @@ const RoomInput = styled.input`
   border-radius: 6px;
   padding: 0.55rem 0.8rem;
   color: var(--lfg);
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
   font-size: 0.85rem;
   outline: none;
-  &:focus { border-color: var(--laccent); }
-  &::placeholder { color: var(--ldim); opacity: 0.6; }
+  &:focus {
+    border-color: var(--laccent);
+  }
+  &::placeholder {
+    color: var(--ldim);
+    opacity: 0.6;
+  }
 `;
 
 const CreateBtn = styled.button`
@@ -294,8 +347,13 @@ const CreateBtn = styled.button`
   font-weight: 600;
   white-space: nowrap;
   transition: opacity 0.15s;
-  &:hover { opacity: 0.88; }
-  &:disabled { opacity: 0.5; cursor: not-allowed; }
+  &:hover {
+    opacity: 0.88;
+  }
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 `;
 
 const CreateError = styled.div`
@@ -319,11 +377,13 @@ const ResultLabel = styled.div`
   letter-spacing: 0.04em;
   margin-bottom: 0.3rem;
   margin-top: 0.75rem;
-  &:first-child { margin-top: 0; }
+  &:first-child {
+    margin-top: 0;
+  }
 `;
 
 const ResultValue = styled.div`
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
   font-size: 0.82rem;
   color: var(--laccent);
   word-break: break-all;
@@ -340,7 +400,7 @@ const ResultValue = styled.div`
 
 const ResultLink = styled.a`
   color: var(--laccent);
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
   font-size: 0.82rem;
   word-break: break-all;
 `;
@@ -356,7 +416,9 @@ const PromptBlock = styled.div`
   color: var(--lfg);
   cursor: pointer;
   transition: border-color 0.15s;
-  &:hover { border-color: var(--laccent); }
+  &:hover {
+    border-color: var(--laccent);
+  }
 `;
 
 const PromptBlockLabel = styled.div`
@@ -368,6 +430,13 @@ const PromptBlockLabel = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
+`;
+
+const Lockup = styled.div`
+  display: flex;
+  gap: 2em;
+  align-items: center;
+  margin-bottom: 2em;
 `;
 
 // ── Data ────────────────────────────────────────────────────────────────────
@@ -383,17 +452,20 @@ interface LandingData {
   try_section_intro: string;
   prompts_section_intro: string;
   prompts: { label: string; text: string }[];
-  howItWorksHtml: string;  // body up to and including ## How it works
-  restHtml: string;        // body after ## How it works section
+  howItWorksHtml: string; // body up to and including ## How it works
+  restHtml: string; // body after ## How it works section
 }
 
 const DEFAULT_DATA: LandingData = {
   version: "v6",
   tagline: "Shared rooms where AI agents coordinate in real-time",
-  intro: "sync is a lightweight coordination backend for multi-agent workflows.",
+  intro:
+    "sync is a lightweight coordination backend for multi-agent workflows.",
   skill_section_intro: "Point your orchestrator agent at the skill guide.",
-  try_section_intro: "Create a room right here, then hand the credentials to an orchestrator agent.",
-  prompts_section_intro: "Copy any of these into Claude Code to spin up a multi-agent workflow.",
+  try_section_intro:
+    "Create a room right here, then hand the credentials to an orchestrator agent.",
+  prompts_section_intro:
+    "Copy any of these into Claude Code to spin up a multi-agent workflow.",
   prompts: [],
   howItWorksHtml: "",
   restHtml: "",
@@ -458,15 +530,23 @@ function parseLandingMd(raw: string): LandingData {
       // Find end of "How it works" section = next ## heading
       const afterMarker = body.slice(splitIdx + "## How it works".length);
       const nextH2 = afterMarker.search(/^## /m);
-      const endOfSection = nextH2 !== -1 ? splitIdx + "## How it works".length + nextH2 : body.length;
+      const endOfSection = nextH2 !== -1
+        ? splitIdx + "## How it works".length + nextH2
+        : body.length;
 
       const howItWorksMd = body.slice(splitIdx, endOfSection);
       const restMd = body.slice(endOfSection).trim();
 
-      data.howItWorksHtml = rewriteDocLinks(processMermaidBlocks(marked.parse(howItWorksMd, { gfm: true })));
-      data.restHtml = rewriteDocLinks(processMermaidBlocks(marked.parse(restMd, { gfm: true })));
+      data.howItWorksHtml = rewriteDocLinks(
+        processMermaidBlocks(marked.parse(howItWorksMd, { gfm: true })),
+      );
+      data.restHtml = rewriteDocLinks(
+        processMermaidBlocks(marked.parse(restMd, { gfm: true })),
+      );
     } else {
-      data.restHtml = rewriteDocLinks(processMermaidBlocks(marked.parse(body, { gfm: true })));
+      data.restHtml = rewriteDocLinks(
+        processMermaidBlocks(marked.parse(body, { gfm: true })),
+      );
     }
   } catch {}
 
@@ -545,9 +625,11 @@ export function Landing() {
       });
       const d = await r.json();
       if (!r.ok) {
-        setCreateError(d.error === "room_exists"
-          ? `Room "${trimmed}" already exists. Try a different name.`
-          : d.error || "Failed to create room");
+        setCreateError(
+          d.error === "room_exists"
+            ? `Room "${trimmed}" already exists. Try a different name.`
+            : d.error || "Failed to create room",
+        );
         return;
       }
       setCreated({ id: d.id, token: d.token });
@@ -570,8 +652,13 @@ export function Landing() {
     <Page>
       <Container>
         {/* ── Hero ── */}
-        <H1>sync</H1>
-        <Subtitle>{landingData.tagline}</Subtitle>
+        <Lockup>
+          <img src={"/static/favicon.svg"} style={{ height: "7em" }} />
+          <div>
+            <H1>/sync</H1>
+            <Subtitle>{landingData.tagline}</Subtitle>
+          </div>
+        </Lockup>
         <Intro>{landingData.intro}</Intro>
 
         {/* ── Getting Started ── */}
@@ -591,60 +678,76 @@ export function Landing() {
           <H2>Try it — create a room</H2>
           <SectionIntro>{landingData.try_section_intro}</SectionIntro>
           <CreateBox>
-            {!created ? (
-              <>
-                <CreateRow>
-                  <RoomInput
-                    type="text"
-                    placeholder="room name (optional, auto-generated if blank)"
-                    value={roomIdInput}
-                    onChange={(e) => setRoomIdInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && !creating && createRoom()}
-                    spellCheck={false}
-                    autoComplete="off"
-                  />
-                  <CreateBtn onClick={createRoom} disabled={creating}>
-                    {creating ? "creating…" : "Create room"}
-                  </CreateBtn>
-                </CreateRow>
-                {createError && <CreateError>{createError}</CreateError>}
-              </>
-            ) : (
-              <ResultBox>
-                <ResultLabel>Dashboard</ResultLabel>
-                <ResultLink href={dashboardUrl} target="_blank">{dashboardUrl}</ResultLink>
+            {!created
+              ? (
+                <>
+                  <CreateRow>
+                    <RoomInput
+                      type="text"
+                      placeholder="room name (optional, auto-generated if blank)"
+                      value={roomIdInput}
+                      onChange={(e) => setRoomIdInput(e.target.value)}
+                      onKeyDown={(e) =>
+                        e.key === "Enter" && !creating && createRoom()}
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                    <CreateBtn onClick={createRoom} disabled={creating}>
+                      {creating ? "creating…" : "Create room"}
+                    </CreateBtn>
+                  </CreateRow>
+                  {createError && <CreateError>{createError}</CreateError>}
+                </>
+              )
+              : (
+                <ResultBox>
+                  <ResultLabel>Dashboard</ResultLabel>
+                  <ResultLink href={dashboardUrl} target="_blank">
+                    {dashboardUrl}
+                  </ResultLink>
 
-                <ResultLabel>Room ID</ResultLabel>
-                <ResultValue>
-                  {created.id}
-                  <CopyBtn onClick={() => copyField(created.id, "id")}>
-                    {copiedField === "id" ? "copied" : "copy"}
-                  </CopyBtn>
-                </ResultValue>
+                  <ResultLabel>Room ID</ResultLabel>
+                  <ResultValue>
+                    {created.id}
+                    <CopyBtn onClick={() => copyField(created.id, "id")}>
+                      {copiedField === "id" ? "copied" : "copy"}
+                    </CopyBtn>
+                  </ResultValue>
 
-                <ResultLabel>Room token (admin)</ResultLabel>
-                <ResultValue>
-                  {created.token}
-                  <CopyBtn onClick={() => copyField(created.token, "token")}>
-                    {copiedField === "token" ? "copied" : "copy"}
-                  </CopyBtn>
-                </ResultValue>
+                  <ResultLabel>Room token (admin)</ResultLabel>
+                  <ResultValue>
+                    {created.token}
+                    <CopyBtn onClick={() => copyField(created.token, "token")}>
+                      {copiedField === "token" ? "copied" : "copy"}
+                    </CopyBtn>
+                  </ResultValue>
 
-                <PromptBlock onClick={() => copyField(orchestratorPrompt, "prompt")}>
-                  <PromptBlockLabel>
-                    Orchestrator prompt — paste into Claude Code
-                    <CopiedTag>{copiedField === "prompt" ? "copied ✓" : "tap to copy"}</CopiedTag>
-                  </PromptBlockLabel>
-                  <span style={{ whiteSpace: "pre-wrap" }}>{orchestratorPrompt}</span>
-                </PromptBlock>
+                  <PromptBlock
+                    onClick={() => copyField(orchestratorPrompt, "prompt")}
+                  >
+                    <PromptBlockLabel>
+                      Orchestrator prompt — paste into Claude Code
+                      <CopiedTag>
+                        {copiedField === "prompt" ? "copied ✓" : "tap to copy"}
+                      </CopiedTag>
+                    </PromptBlockLabel>
+                    <span style={{ whiteSpace: "pre-wrap" }}>
+                      {orchestratorPrompt}
+                    </span>
+                  </PromptBlock>
 
-                <div style={{ marginTop: "0.75rem" }}>
-                  <CopyBtn onClick={() => { setCreated(null); setRoomIdInput(""); }}>
-                    create another
-                  </CopyBtn>
-                </div>
-              </ResultBox>
-            )}
+                  <div style={{ marginTop: "0.75rem" }}>
+                    <CopyBtn
+                      onClick={() => {
+                        setCreated(null);
+                        setRoomIdInput("");
+                      }}
+                    >
+                      create another
+                    </CopyBtn>
+                  </div>
+                </ResultBox>
+              )}
           </CreateBox>
         </Section>
 
@@ -653,10 +756,15 @@ export function Landing() {
           <H2>Example prompts</H2>
           <SectionIntro>{landingData.prompts_section_intro}</SectionIntro>
           {PROMPTS.map((p, i) => (
-            <PromptCard key={i} onClick={() => copyText(p.text, i)}>
+            <PromptCard
+              key={i}
+              onClick={() => copyText(p.text, i)}
+            >
               <PromptLabel>
                 {p.label}
-                <CopiedTag>{copiedIdx === i ? "copied ✓" : "tap to copy"}</CopiedTag>
+                <CopiedTag>
+                  {copiedIdx === i ? "copied ✓" : "tap to copy"}
+                </CopiedTag>
               </PromptLabel>
               <PromptText>{p.text}</PromptText>
             </PromptCard>
@@ -665,14 +773,21 @@ export function Landing() {
 
         {/* ── How It Works + rest of body ── */}
         {(landingData.howItWorksHtml || landingData.restHtml) && (
-          <Prose dangerouslySetInnerHTML={{
-            __html: landingData.howItWorksHtml + landingData.restHtml
-          }} />
+          <Prose
+            dangerouslySetInnerHTML={{
+              __html: landingData.howItWorksHtml + landingData.restHtml,
+            }}
+          />
         )}
 
-        <DashHint>Dashboard: <code>{"/?room=ROOM_ID#token=TOKEN"}</code></DashHint>
+        <DashHint>
+          Dashboard: <code>{"/?room=ROOM_ID#token=TOKEN"}</code>
+        </DashHint>
       </Container>
-      <Footer>sync {landingData.version} · <a href="https://github.com/christopherdebeer">@christopherdebeer</a></Footer>
+      <Footer>
+        sync {landingData.version} ·{" "}
+        <a href="https://github.com/christopherdebeer">@christopherdebeer</a>
+      </Footer>
     </Page>
   );
 }

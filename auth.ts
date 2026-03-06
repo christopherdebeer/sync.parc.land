@@ -48,7 +48,14 @@ export async function resolveAuth(req: Request, roomId: string): Promise<AuthRes
   if (!header || !header.startsWith("Bearer ")) {
     return UNAUTH;
   }
-  const token = header.slice(7);
+  return resolveAuthFromToken(header.slice(7), roomId);
+}
+
+/**
+ * Resolve auth from a raw token string (no HTTP request needed).
+ * Used by MCP tools for direct function calls.
+ */
+export async function resolveAuthFromToken(token: string, roomId: string): Promise<AuthResult | Response> {
   const hash = await hashToken(token);
 
   // Check room token first
