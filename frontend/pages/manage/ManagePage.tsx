@@ -7,7 +7,7 @@
  *
  * Server renders the sign-in form. Client hydration adds WebAuthn + dashboard.
  */
-import { useCallback, useState } from "https://esm.sh/react@18.2.0";
+import { useCallback, useState, useEffect } from "https://esm.sh/react@18.2.0";
 import { styled } from "../../styled.ts";
 import { Nav } from "../../components/Nav.tsx";
 import {
@@ -359,6 +359,19 @@ export function ManagePage({ origin }: ManagePageProps) {
   const [toastMsg, setToastMsg] = useState("");
   const [toastVisible, setToastVisible] = useState(false);
 
+  useEffect(() => {
+    const savedSessionId = localStorage.getItem('sync_session_id');
+    if (savedSessionId) {
+      setSessionId(savedSessionId);
+      setPhase("dashboard");
+      loadDashboard(savedSessionId).catch(() => {
+        // If session invalid, clear it
+        localStorage.removeItem('sync_session_id');
+        signOut();
+      });
+    }
+  }, []);
+
   function toast(msg: string) {
     setToastMsg(msg);
     setToastVisible(true);
@@ -438,6 +451,7 @@ export function ManagePage({ origin }: ManagePageProps) {
 
       setSessionId(verData.sessionId);
       setPhase("dashboard");
+      localStorage.setItem('sync_session_id', verData.sessionId);
       setStatus("");
       await loadDashboard(verData.sessionId);
     } catch (err: any) {
@@ -564,6 +578,7 @@ export function ManagePage({ origin }: ManagePageProps) {
   }
 
   function signOut() {
+    localStorage.removeItem('sync_session_id');
     setSessionId(null);
     setPhase("auth");
     setStatus("");
