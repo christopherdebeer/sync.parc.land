@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "https://esm.sh/react@18.2.0";
 import { keyframes, styled } from "../styled.ts";
 import { processMermaidBlocks, runMermaid } from "../mermaid.ts";
 import { Nav } from "./Nav.tsx";
+import { Logo } from "./Logo.tsx";
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 
@@ -667,7 +668,7 @@ export function Landing() {
       <Container>
         {/* ── 1. Hero ── */}
         <Lockup>
-          <img src={"/static/favicon.svg"} style={{ height: "7em" }} />
+          <Logo size="7em" />
           <div>
             <H1>/sync</H1>
             <Subtitle>{landingData.tagline}</Subtitle>

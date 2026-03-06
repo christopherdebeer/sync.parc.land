@@ -2,6 +2,7 @@
 /** Shared navigation header — appears on all pages except OAuth authorize. */
 import { useCallback, useEffect, useState } from "https://esm.sh/react@18.2.0";
 import { styled } from "../styled.ts";
+import { Logo } from "./Logo.tsx";
 
 const Bar = styled.nav`
   display: flex;
@@ -27,7 +28,7 @@ const Left = styled.div`
   gap: 1.25rem;
 `;
 
-const Logo = styled.a`
+const LogoLink = styled.a`
   font-weight: 700;
   font-size: 1rem;
   color: var(--fg);
@@ -37,11 +38,6 @@ const Logo = styled.a`
   align-items: center;
   gap: 0.4rem;
   &:hover { text-decoration: none; }
-`;
-
-const LogoImg = styled.img`
-  height: 1.4rem;
-  width: 1.4rem;
 `;
 
 const NavLinks = styled.div`
@@ -69,29 +65,31 @@ const Right = styled.div`
   gap: 0.5rem;
 `;
 
-const ThemeBtn = styled.button`
-  background: none;
+const ThemeToggle = styled.div`
+  display: flex;
   border: 1px solid var(--border);
   border-radius: 6px;
-  color: var(--dim);
+  overflow: hidden;
+`;
+
+const ThemeOption = styled.button<{ $active: boolean }>`
+  background: ${({ $active }) => ($active ? "var(--surface2)" : "transparent")};
+  border: none;
+  color: ${({ $active }) => ($active ? "var(--fg)" : "var(--dim)")};
   cursor: pointer;
-  padding: 0.25rem 0.5rem;
-  font-size: 0.82rem;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.75rem;
   line-height: 1;
   transition: all 0.15s;
   &:hover {
     color: var(--fg);
-    border-color: var(--dim);
+  }
+  & + & {
+    border-left: 1px solid var(--border);
   }
 `;
 
 type Theme = "system" | "light" | "dark";
-
-function getEffective(pref: Theme): "light" | "dark" {
-  if (pref === "light" || pref === "dark") return pref;
-  if (typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches) return "dark";
-  return "light";
-}
 
 export interface NavProps {
   active?: "home" | "docs" | "manage" | "dashboard";
@@ -105,26 +103,23 @@ export function Nav({ active }: NavProps) {
     if (stored === "light" || stored === "dark") setTheme(stored);
   }, []);
 
-  const cycle = useCallback(() => {
-    const next: Theme = theme === "system" ? "dark" : theme === "dark" ? "light" : "system";
-    setTheme(next);
-    if (next === "system") {
+  const pick = useCallback((t: Theme) => {
+    setTheme(t);
+    if (t === "system") {
       localStorage.removeItem("sync-theme");
       document.documentElement.removeAttribute("data-theme");
     } else {
-      localStorage.setItem("sync-theme", next);
-      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("sync-theme", t);
+      document.documentElement.setAttribute("data-theme", t);
     }
-  }, [theme]);
-
-  const icon = getEffective(theme) === "dark" ? "\u263E" : "\u2600";
+  }, []);
 
   return (
     <Bar>
       <Left>
-        <Logo href="/">
-          <LogoImg src="/static/favicon.svg" alt="" />
-        </Logo>
+        <LogoLink href="/">
+          <Logo />
+        </LogoLink>
         <NavLinks>
           <NavLink href="/" $active={active === "home"}>/sync</NavLink>
           <NavLink href="/?doc=SKILL.md" $active={active === "docs"}>Docs</NavLink>
@@ -132,9 +127,11 @@ export function Nav({ active }: NavProps) {
         </NavLinks>
       </Left>
       <Right>
-        <ThemeBtn onClick={cycle} title={`Theme: ${theme}`}>
-          {icon}
-        </ThemeBtn>
+        <ThemeToggle>
+          <ThemeOption $active={theme === "light"} onClick={() => pick("light")} title="Light">{"\u2600"}</ThemeOption>
+          <ThemeOption $active={theme === "system"} onClick={() => pick("system")} title="System">{"\u25D0"}</ThemeOption>
+          <ThemeOption $active={theme === "dark"} onClick={() => pick("dark")} title="Dark">{"\u263E"}</ThemeOption>
+        </ThemeToggle>
       </Right>
     </Bar>
   );

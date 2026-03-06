@@ -142,7 +142,7 @@ export function RecoverPage({ origin }: RecoverPageProps) {
         {step === "token" && (
           <Card>
             <Title>
-              sync<TitleDim>recover</TitleDim>
+              sync<TitleDim>·recover</TitleDim>
             </Title>
             <Subtitle>
               Enter your recovery token to register a new passkey for an
@@ -168,7 +168,7 @@ export function RecoverPage({ origin }: RecoverPageProps) {
         {step === "register" && (
           <Card>
             <Title>
-              sync<TitleDim>·mcp</TitleDim>
+              sync<TitleDim>·recover</TitleDim>
             </Title>
             <Subtitle>
               Token verified for <strong>{username}</strong>. Register a new
@@ -185,7 +185,7 @@ export function RecoverPage({ origin }: RecoverPageProps) {
         {step === "done" && (
           <Card>
             <Title>
-              sync<TitleDim>·mcp</TitleDim>
+              sync<TitleDim>·recover</TitleDim>
             </Title>
             <SuccessText style={{ marginBottom: "1rem" }}>
               New passkey registered successfully. Your recovery token has been
