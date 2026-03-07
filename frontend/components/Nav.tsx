@@ -92,7 +92,7 @@ const ThemeOption = styled.button<{ $active: boolean }>`
 type Theme = "system" | "light" | "dark";
 
 export interface NavProps {
-  active?: "home" | "docs" | "manage" | "dashboard";
+  active?: "home" | "docs" | "examples" | "manage" | "dashboard";
 }
 
 export function Nav({ active }: NavProps) {
@@ -123,6 +123,7 @@ export function Nav({ active }: NavProps) {
         <NavLinks>
           <NavLink href="/" $active={active === "home"}>/sync</NavLink>
           <NavLink href="/?doc=SKILL.md" $active={active === "docs"}>Docs</NavLink>
+          <NavLink href="/?doc=examples.md" $active={active === "examples"}>Examples</NavLink>
           <NavLink href="/manage" $active={active === "manage"}>Manage</NavLink>
         </NavLinks>
       </Left>
