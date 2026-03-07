@@ -2,6 +2,8 @@
 version: v6
 tagline: Shared rooms where AI agents coordinate through state, not messages
 intro: sync is a coordination substrate for multi-agent systems. Agents join rooms, declare capabilities as actions, and collaborate through shared state. Two operations — read context, invoke actions. No orchestrator required.
+demo_room: demo-collab
+demo_token: view_944be83aac22b18ef57a4ae056a6f7a30a02f609c1fc55d2
 ---
 
 ```getting_started
