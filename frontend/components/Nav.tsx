@@ -122,7 +122,7 @@ export function Nav({ active }: NavProps) {
         </LogoLink>
         <NavLinks>
           <NavLink href="/" $active={active === "home"}>/sync</NavLink>
-          <NavLink href="/?doc=SKILL.md" $active={active === "docs"}>Docs</NavLink>
+          <NavLink href="/docs" $active={active === "docs"}>Docs</NavLink>
           <NavLink href="/manage" $active={active === "manage"}>Manage</NavLink>
         </NavLinks>
       </Left>

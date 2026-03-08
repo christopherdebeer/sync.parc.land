@@ -1,47 +1,10 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
+/** SSR-friendly doc page — receives pre-rendered HTML from the server.
+ *  No client-side markdown fetching or parsing needed. */
 import { useState, useEffect, useCallback } from "https://esm.sh/react@18.2.0";
 import { styled } from "../styled.ts";
-import { processMermaidBlocks, runMermaid } from "../mermaid.ts";
+import { runMermaid } from "../mermaid.ts";
 import { Nav } from "./Nav.tsx";
-
-// ── Raw URL mapping ─────────────────────────────────────────────────────────
-
-const DOC_META: Record<string, { title: string; rawPath: string }> = {
-  // --- Reference ---
-  "SKILL.md":    { title: "Skill Guide",           rawPath: "/SKILL.md" },
-  "api.md":      { title: "API Reference",          rawPath: "/reference/api.md" },
-  "cel.md":      { title: "CEL Reference",          rawPath: "/reference/cel.md" },
-  "examples.md": { title: "Examples",               rawPath: "/reference/examples.md" },
-  "v6.md":       { title: "Architecture",           rawPath: "/reference/v6.md" },
-  "views.md":    { title: "Views Reference",        rawPath: "/reference/views.md" },
-  "help.md":     { title: "Help Reference",         rawPath: "/reference/help.md" },
-  "surfaces.md": { title: "Surfaces Reference",     rawPath: "/reference/surfaces.md" },
-  "landing.md":  { title: "Landing",                rawPath: "/reference/landing.md" },
-  // --- Essays & Design ---
-  "what-becomes-true.md":           { title: "What Becomes True",      rawPath: "/docs/what-becomes-true.md" },
-  "introducing-sync.md":            { title: "Introducing Sync",       rawPath: "/docs/introducing-sync.md" },
-  "the-substrate-thesis.md":        { title: "The Substrate Thesis",   rawPath: "/docs/the-substrate-thesis.md" },
-  "SUBSTRATE.md":                   { title: "Substrate (Compact)",    rawPath: "/docs/SUBSTRATE.md" },
-  "isnt-this-just-react.md":        { title: "Isn't This Just ReAct?", rawPath: "/docs/isnt-this-just-react.md" },
-  "pressure-field.md":              { title: "The Pressure Field",     rawPath: "/docs/pressure-field.md" },
-  "sigma-calculus.md":              { title: "Σ-calculus",             rawPath: "/docs/sigma-calculus.md" },
-  "surfaces-design.md":             { title: "Surfaces as Substrate",  rawPath: "/docs/surfaces-design.md" },
-  "agent-sync-technical-design.md": { title: "Technical Design",       rawPath: "/docs/agent-sync-technical-design.md" },
-  "agency-and-identity.md":         { title: "Agency and Identity",    rawPath: "/docs/agency-and-identity.md" },
-  "frontend-unify.md":              { title: "Frontend Unification",   rawPath: "/docs/frontend-unify.md" },
-};
-
-/** Rewrite *.md hrefs in rendered HTML to /?doc=filename so links work
- *  in DocViewer. Strips any path prefix (e.g. reference/api.md → api.md).
- *  Raw links between files at /reference/*.md keep working because the
- *  server serves them at their natural paths — only DocViewer-rendered
- *  links need rewriting. */
-function rewriteDocLinks(html: string): string {
-  return html.replace(
-    /href="([^"]*?)([^"/]+\.md)"/g,
-    (_match, _prefix, filename) => `href="/?doc=${filename}"`,
-  );
-}
 
 // ── Styled ──────────────────────────────────────────────────────────────────
 
@@ -262,13 +225,6 @@ const Prose = styled.div`
   }
 `;
 
-const Loading = styled.div`
-  color: var(--dim);
-  font-size: 0.9rem;
-  padding: 3rem 0;
-  text-align: center;
-`;
-
 const ErrorMsg = styled.div`
   color: #f85149;
   font-size: 0.9rem;
@@ -277,41 +233,21 @@ const ErrorMsg = styled.div`
   a { color: var(--accent); }
 `;
 
-// ── Component ───────────────────────────────────────────────────────────────
+// ── DocPage component (SSR-rendered) ────────────────────────────────────────
 
-declare const marked: { parse: (md: string, opts?: any) => string };
+export interface DocPageProps {
+  slug: string;
+  title: string;
+  html: string;
+  rawPath?: string;
+}
 
-export function DocViewer({ docId }: { docId: string }) {
-  const [html, setHtml] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+export function DocPage({ slug, title, html, rawPath }: DocPageProps) {
   const [copied, setCopied] = useState<string | null>(null);
-
-  const meta = DOC_META[docId];
-  const origin = typeof globalThis.location !== "undefined" ? globalThis.location.origin : "";
-  const rawUrl = meta ? `${origin}${meta.rawPath}` : null;
 
   useEffect(() => {
     if (html) runMermaid();
   }, [html]);
-
-  useEffect(() => {
-    if (!meta || !rawUrl) {
-      setError(`Unknown document: ${docId}`);
-      return;
-    }
-    setHtml(null);
-    setError(null);
-    fetch(meta.rawPath)
-      .then((r) => {
-        if (!r.ok) throw new Error(`${r.status}`);
-        return r.text();
-      })
-      .then((md) => {
-        const rendered = rewriteDocLinks(processMermaidBlocks(marked.parse(md, { breaks: false, gfm: true })));
-        setHtml(rendered);
-      })
-      .catch((e) => setError(`Failed to load ${docId}: ${e.message}`));
-  }, [docId]);
 
   const copy = useCallback((text: string, label: string) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -320,39 +256,103 @@ export function DocViewer({ docId }: { docId: string }) {
     }).catch(() => {});
   }, []);
 
-  if (!meta) {
-    return (
-      <Page>
-        <Nav active="docs" />
-        <Container>
-          <ErrorMsg>
-            Unknown document "{docId}". <a href="/">← Back</a>
-          </ErrorMsg>
-        </Container>
-      </Page>
-    );
-  }
+  const origin = typeof globalThis.location !== "undefined" ? globalThis.location.origin : "";
+  const pageUrl = `${origin}/docs/${slug}`;
 
   return (
     <Page>
       <Nav active="docs" />
       <TopBar>
-        <BackLink href="/">← sync</BackLink>
-        <DocTitle>{meta.title}</DocTitle>
+        <BackLink href="/docs">{"\u2190"} docs</BackLink>
+        <DocTitle>{title}</DocTitle>
         <Actions>
-          <Btn onClick={() => copy(rawUrl!, "url")}>
-            {copied === "url" ? "copied ✓" : "copy URL"}
+          <Btn onClick={() => copy(pageUrl, "url")}>
+            {copied === "url" ? "copied \u2713" : "copy URL"}
           </Btn>
-          <Btn as="a" href={meta.rawPath} target="_blank" style={{ textDecoration: "none" }}>
-            source
-          </Btn>
+          {rawPath && (
+            <Btn as="a" href={rawPath} target="_blank" style={{ textDecoration: "none" }}>
+              source
+            </Btn>
+          )}
         </Actions>
       </TopBar>
       <Container>
-        {error && <ErrorMsg>{error}</ErrorMsg>}
-        {!error && !html && <Loading>Loading…</Loading>}
-        {html && <Prose dangerouslySetInnerHTML={{ __html: html }} />}
+        <Prose dangerouslySetInnerHTML={{ __html: html }} />
       </Container>
+    </Page>
+  );
+}
+
+// ── DocsIndex component ─────────────────────────────────────────────────────
+
+const IndexContainer = styled.div`
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 3rem;
+  width: 100%;
+  @media (max-width: 480px) {
+    padding: 1.5rem 1rem 2rem;
+  }
+`;
+
+const IndexTitle = styled.h1`
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  margin-bottom: 0.3rem;
+`;
+
+const IndexSub = styled.p`
+  font-size: 0.88rem;
+  color: var(--dim);
+  margin-bottom: 2rem;
+`;
+
+const SectionLabel = styled.h2`
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  margin: 1.8rem 0 0.6rem;
+  &:first-of-type { margin-top: 0; }
+`;
+
+const DocLink = styled.a`
+  display: block;
+  padding: 0.5rem 0.7rem;
+  margin: 0.15rem 0;
+  border-radius: 6px;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.92rem;
+  transition: background 0.12s;
+  &:hover { background: var(--surface); }
+`;
+
+export interface DocsIndexProps {
+  docs: Array<{ slug: string; title: string; category: string }>;
+}
+
+export function DocsIndex({ docs }: DocsIndexProps) {
+  const reference = docs.filter(d => d.category === "reference");
+  const essays = docs.filter(d => d.category === "essay");
+
+  return (
+    <Page>
+      <Nav active="docs" />
+      <IndexContainer>
+        <IndexTitle>Documentation</IndexTitle>
+        <IndexSub>Reference guides and essays on the substrate thesis.</IndexSub>
+        <SectionLabel>Reference</SectionLabel>
+        {reference.map(d => (
+          <DocLink key={d.slug} href={`/docs/${d.slug}`}>{d.title}</DocLink>
+        ))}
+        <SectionLabel>Essays &amp; Design</SectionLabel>
+        {essays.map(d => (
+          <DocLink key={d.slug} href={`/docs/${d.slug}`}>{d.title}</DocLink>
+        ))}
+      </IndexContainer>
     </Page>
   );
 }

@@ -1,40 +1,49 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
-/** Page renderers for main.ts — SSR each page to a Response.
- *
- * main.ts calls these instead of serving the SPA shell.
- * Each function returns a complete HTML Response with SSR + hydration.
- */
+/** Page renderers for main.ts — SSR each page to a Response. */
 import { renderPage } from "./ssr.ts";
-import { Landing } from "./components/Landing.tsx";
+import { Landing, parseLandingMd } from "./components/Landing.tsx";
 import { Dashboard } from "./components/Dashboard.tsx";
-import { DocViewer } from "./components/DocViewer.tsx";
+import { DocPage, DocsIndex } from "./components/DocViewer.tsx";
+import { mdToHtml } from "./markdown.ts";
 
-const MARKED_SCRIPT = '<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>';
+const LANDING_MD_URL = new URL("../reference/landing.md", import.meta.url);
+const LANDING_RAW = await fetch(LANDING_MD_URL).then(r => r.text()).catch(() => "");
 
 export function renderLandingPage(): Response {
+  const data = parseLandingMd(LANDING_RAW, mdToHtml);
   return renderPage({
-    element: <Landing />,
-    entry: "/frontend/pages/landing/client.tsx",
+    element: <Landing data={data} />,
+    entry: "https://esm.town/v/c15r/sync/frontend/pages/landing/client.tsx",
+    props: { data },
     title: "sync — Multi-Agent Coordination for AI Workflows",
-    headScripts: MARKED_SCRIPT,
   });
 }
 
 export function renderDashboardPage(roomId: string): Response {
   return renderPage({
     element: <Dashboard roomId={roomId} />,
-    entry: "/frontend/pages/dashboard/client.tsx",
+    entry: "https://esm.town/v/c15r/sync/frontend/pages/dashboard/client.tsx",
     props: { roomId },
     title: `${roomId} — sync dashboard`,
   });
 }
 
-export function renderDocPage(docId: string): Response {
+/** Render a single doc page — markdown is already converted to HTML server-side. */
+export function renderDocPage(slug: string, title: string, html: string, rawPath?: string): Response {
   return renderPage({
-    element: <DocViewer docId={docId} />,
-    entry: "/frontend/pages/docs/client.tsx",
-    props: { docId },
-    title: `${docId} — sync docs`,
-    headScripts: MARKED_SCRIPT,
+    element: <DocPage slug={slug} title={title} html={html} rawPath={rawPath} />,
+    entry: "https://esm.town/v/c15r/sync/frontend/pages/docs/client.tsx",
+    props: { slug, title, html, rawPath },
+    title: `${title} — sync docs`,
+  });
+}
+
+/** Render the docs index page listing all available docs. */
+export function renderDocsIndex(docs: Array<{ slug: string; title: string; category: string }>): Response {
+  return renderPage({
+    element: <DocsIndex docs={docs} />,
+    entry: "https://esm.town/v/c15r/sync/frontend/pages/docs/client.tsx",
+    props: { docs },
+    title: "Documentation — sync",
   });
 }

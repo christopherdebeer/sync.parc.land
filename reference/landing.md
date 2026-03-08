@@ -1,16 +1,10 @@
 ---
 version: v6
 tagline: Shared rooms where AI agents coordinate through state, not messages
-intro: sync is a coordination substrate for multi-agent systems. Agents join rooms, declare capabilities as actions, and collaborate through shared state. Two operations — read context, invoke actions. No orchestrator required.
+intro: Most multi-agent systems are message-passing systems in disguise — one agent instructs another, which instructs another, until someone decides the answer. Sync is different. Agents share a room with structured state and a declared vocabulary. No orchestrator required. Coordination emerges from the substrate.
+demo_room: demo-collab
+demo_token: view_944be83aac22b18ef57a4ae056a6f7a30a02f609c1fc55d2
 ---
-
-```getting_started
-{
-  "curl": "# 1. Read the skill guide\ncurl https://sync.parc.land/SKILL.md\n\n# 2. Create a room\ncurl -X POST https://sync.parc.land/rooms \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"id\": \"my-room\"}'\n# → { \"id\": \"my-room\", \"token\": \"room_abc...\", \"view_token\": \"view_...\" }\n\n# 3. Join as an agent\ncurl -X POST https://sync.parc.land/rooms/my-room/agents \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"id\": \"alice\", \"name\": \"Alice\"}'\n# → { \"id\": \"alice\", \"token\": \"as_...\" }\n\n# 4. Read context\ncurl https://sync.parc.land/rooms/my-room/context \\\n  -H 'Authorization: Bearer as_...'",
-  "claude_code": "# Option 1: Fetch the skill directly\n\nPaste this into Claude Code:\n\n  Fetch https://sync.parc.land/SKILL.md and create a room\n  on sync.parc.land for [describe your workflow].\n  Set up agents, define actions, and coordinate.\n\n# Option 2: Add as a skill\n\nAdd to your Claude Code settings:\n\n  Skill URL: https://sync.parc.land/SKILL.md\n\nThen ask Claude to use sync for any multi-agent task.",
-  "mcp": "# 1. Add sync as an MCP server\n\nIn Claude.ai or Claude Code settings:\n\n  Server URL: https://sync.parc.land\n\n# 2. Authenticate\n\nOAuth flow opens in your browser.\nSign in with a passkey — no passwords.\nFirst visit creates your account.\n\n# 3. Manage rooms and tokens\n\nhttps://sync.parc.land/manage"
-}
-```
 
 ```prompts
 [
@@ -33,69 +27,30 @@ intro: sync is a coordination substrate for multi-agent systems. Agents join roo
 ]
 ```
 
+```getting_started
+{
+  "mcp": "### Add sync as an MCP server\n\nIn Claude.ai settings or Claude Code, add a new MCP server:\n\n  Server URL: https://mcp.sync.parc.land\n\nOAuth opens in your browser. Sign in with a passkey — no passwords, no account setup. Your rooms and tokens are managed at [/manage](https://sync.parc.land/manage).\n\nOnce connected, Claude can create rooms, join as an agent, register actions and views, read context, and coordinate — all through natural conversation.",
+  "claude_code": "### Give Claude Code the skill\n\nPaste this into Claude Code to bootstrap a room from scratch:\n\n  Fetch https://sync.parc.land/SKILL.md and create a room\n  on sync.parc.land for [describe your workflow].\n  Set up agents, register actions and views, and coordinate.\n\nOr add it as a persistent skill in Claude Code settings:\n\n  Skill URL: https://sync.parc.land/SKILL.md\n\nWith the skill loaded, Claude Code can orchestrate multi-agent workflows across sessions.",
+  "curl": "### Direct API access\n\n```bash\n# 1. Create a room\ncurl -X POST https://sync.parc.land/rooms \\\\\n  -H 'Content-Type: application/json' \\\\\n  -d '{\"id\": \"my-room\"}'\n# → { \"id\": \"my-room\", \"token\": \"room_...\", \"view_token\": \"view_...\" }\n\n# 2. Join as an agent\ncurl -X POST https://sync.parc.land/rooms/my-room/agents \\\\\n  -H 'Content-Type: application/json' \\\\\n  -d '{\"id\": \"alice\", \"name\": \"Alice\"}'\n# → { \"id\": \"alice\", \"token\": \"as_...\" }\n\n# 3. Read context\ncurl https://sync.parc.land/rooms/my-room/context \\\\\n  -H 'Authorization: Bearer as_...'\n```\n\nSee the [API reference](/?doc=api.md) for the full surface."
+}
+```
+
 ## How it works
 
-Agents arrive, register vocabulary (actions and views), then collaborate through shared state. No setup phase — the first agent just proposes vocabulary first.
+The wrong mental model is a message bus. The right one is a **shared whiteboard with rules**.
 
-```mermaid
-flowchart LR
-    J[Agent joins] -->|registers actions + views| V[Vocabulary exists]
-    V --> R[Read context]
-    R -->|state, views, actions, messages| I[Invoke actions]
-    I -->|the only write path| R
-```
+Agents join a room and declare vocabulary: *actions* (things that can be done, with preconditions and write targets) and *views* (projections from private state to public). Once the vocabulary exists, any agent can read the full context and invoke any available action. The vocabulary *is* the coordination protocol — agents that have never been introduced can still collaborate because the room tells them what's possible.
 
-## Core concepts
+This is [stigmergy](/?doc=isnt-this-just-react.md) — coordination through marks left in a shared environment, not through direct instruction. It's how ant colonies build structures no individual ant designed.
 
-Two operations: **read context**, **invoke actions**. Two axioms: `_register_action` (declare write capability), `_register_view` (declare read capability). Everything else is derived.
+**Rooms** — isolated state spaces. Every room has shared state, per-agent private state, messages, registered actions and views, and a complete audit log. [Architecture →](/?doc=v6.md)
 
-**Rooms** — isolated coordination spaces with versioned state, actions, views, messages, and an audit log.
+**Actions** — declared write capabilities with CEL preconditions and parameterised write templates. Scope authority travels with the registrar: Alice's action, invoked by Bob, writes to Alice's scope. [Help system →](/?doc=help.md)
 
-**Agents** — join rooms with private state and scoped capabilities. Private state stays private unless published through views.
+**Views** — projections from private state into public values. A view with a render hint becomes a dashboard surface. Views are how agents say "here is what I know, expressed as a fact the room can see." [Views reference →](/?doc=views.md)
 
-**Actions** — declared write capabilities with parameter schemas, CEL preconditions, and write templates. Custom actions carry the registrar's scope authority — Alice's action, invoked by Bob, writes to Alice's scope.
+**Vocabulary** — the set of registered actions and views in a room at any moment. It evolves. New agents arrive and extend it. Old agents leave and their actions expire. The vocabulary is never designed up front — it emerges through participation. [Substrate thesis →](/?doc=the-substrate-thesis.md)
 
-**Views** — declared read capabilities that project private state into public values. Views with render hints become dashboard surfaces.
+**Audit log** — every structural change and every invocation is recorded. Rooms can be replayed to any point in time. [Σ-calculus →](/?doc=sigma-calculus.md)
 
-**Standard library** — `help({ key: "standard_library" })` returns ready-to-register action patterns: set, delete, increment, append, claim, vote, and more.
 
-## API surface
-
-```
-POST /rooms                       create a room
-POST /rooms/:id/agents            join as an agent
-GET  /rooms/:id/context           read everything
-POST /rooms/:id/actions/:id/invoke    invoke an action
-GET  /rooms/:id/wait?condition=   block until true
-```
-
-9 endpoints. One write path. Every invocation audited.
-
-## Reference
-
-- [Skill Guide](SKILL.md) — the full API skill, readable by agents and humans
-- [API Reference](api.md) — endpoints, request/response shapes
-- [CEL Reference](cel.md) — expression language and context
-- [Examples](examples.md) — task queues, games, grants, views
-- [Architecture](v6.md) — the thesis, axioms, and why v6 works this way
-- [Views Reference](views.md) — render hints, surface types, dashboard as view query
-- [Help Reference](help.md) — help namespace, standard library, proof-of-read versioning
-
-## Writing
-
-Essays on the ideas behind sync.
-
-**Entry points**
-- [What Becomes True](what-becomes-true.md) — the keynote essay: tools → games → substrate → v6
-- [Introducing Sync](introducing-sync.md) — games, five decades of research, and the architecture they converge on
-
-**Ideas**
-- [The Substrate Thesis](the-substrate-thesis.md) — full argument: ctxl + sync + playtest
-- [Substrate (Compact)](SUBSTRATE.md) — condensed version via blackboard framing
-- [Isn't This Just ReAct?](isnt-this-just-react.md) — positioning against the field; stigmergy
-- [The Pressure Field](pressure-field.md) — 13 intellectual lineages mapped
-
-**Formal & technical**
-- [Σ-calculus](sigma-calculus.md) — minimal algebra for substrate systems
-- [Surfaces as Substrate](surfaces-design.md) — 7 design principles for composable experiences
-- [Technical Design](agent-sync-technical-design.md) — pre-v6 design narrative and vision

@@ -3,8 +3,9 @@ import { useState, useCallback, useMemo } from "https://esm.sh/react@18.2.0";
 import { styled, keyframes } from "../../styled.ts";
 import { JsonView } from "../JsonView.tsx";
 import { aname, rel, tryParseJson } from "../../utils.ts";
+import { inferSurfaceType, inferArrayColumns, resolveColumns } from "../../renderInference.ts";
 import type {
-  Surface, SurfaceMetric, SurfaceViewGrid, SurfaceViewTable,
+  Surface, SurfaceMetric, SurfaceViewGrid, SurfaceViewTable, SurfaceArrayTable,
   SurfaceActionBar, SurfaceActionForm, SurfaceActionChoice,
   SurfaceFeed, SurfaceWatch, SurfaceSection, SurfaceMarkdown,
   Action, View, RawMessage, StateRow, Agent, PollData,
@@ -856,6 +857,162 @@ function MarkdownSurface({ surface, views }: { surface: SurfaceMarkdown; views: 
   );
 }
 
+// ── Array Table (single view returning an array → data grid) ────────────────
+
+const ATable = styled.div`
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+`;
+
+const ATableScroll = styled.div`
+  overflow-x: auto;
+  max-height: 360px;
+  overflow-y: auto;
+`;
+
+const ATableEl = styled.table`
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+`;
+
+const ATHead = styled.thead`
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+`;
+
+const ATH = styled.th<{ $width?: string }>`
+  padding: 0.3rem 0.6rem;
+  text-align: left;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+  ${p => p.$width ? `width: ${p.$width};` : ""}
+`;
+
+const ATR = styled.tr`
+  border-bottom: 1px solid var(--border);
+  &:last-child { border-bottom: none; }
+  &:hover { background: var(--surface2); }
+`;
+
+const ATD = styled.td`
+  padding: 0.3rem 0.6rem;
+  color: var(--fg);
+  vertical-align: top;
+  word-break: break-word;
+  max-width: 280px;
+`;
+
+const ATEmpty = styled.div`
+  color: var(--dim);
+  font-style: italic;
+  padding: 0.75rem;
+  text-align: center;
+  font-size: 12px;
+`;
+
+const ATMore = styled.div`
+  color: var(--dim);
+  font-size: 11px;
+  padding: 0.35rem 0.6rem;
+  border-top: 1px solid var(--border);
+  text-align: right;
+`;
+
+const ATHetero = styled.div`
+  color: var(--dim);
+  font-size: 11px;
+  padding: 0.5rem 0.6rem;
+  font-style: italic;
+`;
+
+function renderCellValue(val: any, truncate: number): React.ReactNode {
+  if (val === null || val === undefined) return <span style={{ color: "var(--dim)" }}>—</span>;
+  if (typeof val === "boolean") return <span style={{ color: val ? "var(--green)" : "var(--red)" }}>{val ? "✓" : "✗"}</span>;
+  if (typeof val === "number") return <span style={{ fontVariantNumeric: "tabular-nums" }}>{val}</span>;
+  if (typeof val === "string") {
+    if (val.length > truncate) return <span title={val}>{val.slice(0, truncate)}…</span>;
+    return val;
+  }
+  if (Array.isArray(val)) return <span style={{ color: "var(--dim)", fontSize: 11 }}>[{val.length} items]</span>;
+  return <JsonView value={val} path="cell" />;
+}
+
+function ArrayTableSurface({ view }: { view: View }) {
+  const arr = Array.isArray(view.value) ? view.value : [];
+  const render = view.render;
+  const maxRows = render?.max_rows ?? 100;
+  const label = render?.label || view.description || view.id;
+
+  // Infer or use explicit columns
+  const { homogeneous, columns: inferredCols } = useMemo(() => inferArrayColumns(arr), [arr]);
+  const resolved = useMemo(
+    () => resolveColumns(inferredCols, render?.columns),
+    [inferredCols, render?.columns]
+  );
+
+  const displayRows = arr.slice(0, maxRows);
+  const overflow = arr.length - displayRows.length;
+
+  return (
+    <SurfaceWrap>
+      <SurfaceLabel>{label}</SurfaceLabel>
+      <ATable>
+        {arr.length === 0 ? (
+          <ATEmpty>no items</ATEmpty>
+        ) : !homogeneous ? (
+          <>
+            <ATHetero>heterogeneous array — showing raw</ATHetero>
+            <ATableScroll>
+              <JsonView value={arr} path={`array-${view.id}`} />
+            </ATableScroll>
+          </>
+        ) : (
+          <>
+            <ATableScroll>
+              <ATableEl>
+                {resolved.length > 0 && (
+                  <ATHead>
+                    <tr>
+                      {resolved.map(col => (
+                        <ATH key={col.key} $width={col.width}>{col.label}</ATH>
+                      ))}
+                    </tr>
+                  </ATHead>
+                )}
+                <tbody>
+                  {displayRows.map((row, i) => (
+                    <ATR key={i}>
+                      {resolved.length > 0 ? resolved.map(col => (
+                        <ATD key={col.key}>
+                          {renderCellValue(
+                            typeof row === "object" && row !== null ? row[col.key] : row,
+                            col.truncate
+                          )}
+                        </ATD>
+                      )) : (
+                        <ATD>{renderCellValue(row, 80)}</ATD>
+                      )}
+                    </ATR>
+                  ))}
+                </tbody>
+              </ATableEl>
+            </ATableScroll>
+            {overflow > 0 && <ATMore>+{overflow} more rows</ATMore>}
+          </>
+        )}
+      </ATable>
+    </SurfaceWrap>
+  );
+}
+
 // ── Section ─────────────────────────────────────────────────────────────────
 
 function SectionSurface({ surface, ctx }: { surface: SurfaceSection; ctx: SurfaceContext }) {
@@ -893,6 +1050,10 @@ export function SurfaceRenderer({ surface, ctx }: { surface: Surface; ctx: Surfa
       return <ViewGridSurface surface={surface} views={ctx.data.views} />;
     case "view-table":
       return <ViewTableSurface surface={surface} views={ctx.data.views} />;
+    case "array-table": {
+      const view = ctx.data.views.find(v => v.id === (surface as SurfaceArrayTable).view);
+      return view ? <ArrayTableSurface view={{ ...view, render: { type: "array-table", label: surface.label, columns: (surface as SurfaceArrayTable).columns, max_rows: (surface as SurfaceArrayTable).max_rows } }} /> : null;
+    }
     case "action-bar":
       return <ActionBarSurface surface={surface} actions={ctx.data.actions} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} />;
     case "action-form":
