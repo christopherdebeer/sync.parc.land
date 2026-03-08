@@ -7,6 +7,15 @@
 import { sqlite } from "https://esm.town/v/std/sqlite";
 import { migrate } from "../schema.ts";
 
+// Re-export scope types and functions for backward compatibility
+export {
+  type ParsedScope,
+  type RoomScope,
+  parseScope,
+  serializeScope,
+  checkRoomInScope,
+} from "./scope.ts";
+
 // ─── Schema migration (delegates to unified schema + ensures smcp_ tables) ──
 
 export async function ensureSchema() {
@@ -425,7 +434,6 @@ export async function vaultStore(entry: {
   isDefault?: boolean;
 }) {
   const id = generateId();
-  // Clear default flag if setting new default
   if (entry.isDefault) {
     await sqlite.execute({
       sql: "UPDATE smcp_vault SET is_default = 0 WHERE user_id = ?",
@@ -517,7 +525,6 @@ const MAX_ACTIVE_RECOVERY_TOKENS = 3;
 export async function createRecoveryToken(
   userId: string,
 ): Promise<{ token: string; expiresAt: string } | { error: string }> {
-  // Check limit
   const countRes = await sqlite.execute({
     sql:
       "SELECT COUNT(*) FROM smcp_recovery_tokens WHERE user_id = ? AND used = 0 AND expires_at > datetime('now')",
@@ -612,88 +619,7 @@ export async function cleanupExpired() {
         "DELETE FROM smcp_recovery_tokens WHERE expires_at < datetime('now') OR used = 1",
       args: [],
     },
-    // Keep access/refresh tokens for audit; could prune old ones
   ]);
-}
-
-// ─── Scope Parsing ──────────────────────────────────────────────
-
-export interface ParsedScope {
-  rooms: Map<string, RoomScope>;
-  createRooms: boolean;
-}
-
-export interface RoomScope {
-  level: "full" | "observe" | "role";
-  role?: string;
-}
-
-/** Parse OAuth scope string into structured form.
- *  Format: "rooms:X rooms:Y:role:Z rooms:W:observe create_rooms" */
-export function parseScope(scope: string): ParsedScope {
-  const result: ParsedScope = { rooms: new Map(), createRooms: false };
-  for (const part of scope.split(/\s+/).filter(Boolean)) {
-    if (part === "create_rooms") {
-      result.createRooms = true;
-    } else if (part.startsWith("rooms:")) {
-      const segments = part.split(":");
-      const roomId = segments[1];
-      if (!roomId) continue;
-      if (segments[2] === "observe") {
-        result.rooms.set(roomId, { level: "observe" });
-      } else if (segments[2] === "role" && segments[3]) {
-        result.rooms.set(roomId, { level: "role", role: segments[3] });
-      } else {
-        result.rooms.set(roomId, { level: "full" });
-      }
-    }
-    // Legacy: "sync:rooms" or "sync:rooms.admin" → broad access (no room restriction)
-  }
-  return result;
-}
-
-/** Serialize a ParsedScope back to a scope string. */
-export function serializeScope(parsed: ParsedScope): string {
-  const parts: string[] = [];
-  for (const [roomId, scope] of parsed.rooms) {
-    if (scope.level === "observe") parts.push(`rooms:${roomId}:observe`);
-    else if (scope.level === "role") parts.push(`rooms:${roomId}:role:${scope.role}`);
-    else parts.push(`rooms:${roomId}`);
-  }
-  if (parsed.createRooms) parts.push("create_rooms");
-  return parts.join(" ");
-}
-
-/** Check if a scope grants access to a room at the required level. */
-export function checkRoomInScope(
-  parsed: ParsedScope, roomId: string,
-  requiredLevel: "observe" | "embody" | "embody_role",
-  role?: string,
-): { allowed: boolean; reason?: string } {
-  const roomScope = parsed.rooms.get(roomId);
-
-  // No room-level grants AND no rooms in scope → legacy broad scope, defer to user_rooms
-  if (!roomScope && parsed.rooms.size === 0) {
-    return { allowed: true };
-  }
-
-  if (!roomScope) {
-    return { allowed: false, reason: "room_not_in_scope" };
-  }
-
-  if (requiredLevel === "observe") return { allowed: true };
-
-  if (roomScope.level === "observe") {
-    return { allowed: false, reason: "scope_observe_only" };
-  }
-
-  if (requiredLevel === "embody_role" && roomScope.level === "role") {
-    if (roomScope.role !== role) {
-      return { allowed: false, reason: "scope_role_mismatch" };
-    }
-  }
-
-  return { allowed: true };
 }
 
 // ─── User-Room CRUD ─────────────────────────────────────────────
@@ -803,7 +729,6 @@ export async function deleteUserSession(tokenHash: string) {
   });
 }
 
-/** Transfer embodiments from old session to new (for token refresh). */
 export async function transferEmbodiments(
   oldTokenHash: string, newTokenHash: string,
 ) {
@@ -878,13 +803,11 @@ export async function removeAllEmbodiments(sessionHash: string) {
 
 // ─── Vault → User-Rooms Migration (one-time) ────────────────────
 
-/** Migrate existing vault room-token entries to smcp_user_rooms as 'owner'.
- *  Runs once when smcp_user_rooms is empty and vault has entries. */
 export async function migrateVaultToUserRooms() {
   const count = await sqlite.execute({
     sql: "SELECT COUNT(*) FROM smcp_user_rooms", args: [],
   });
-  if (Number(count.rows[0][0]) > 0) return; // Already has data
+  if (Number(count.rows[0][0]) > 0) return;
 
   const vaultEntries = await sqlite.execute({
     sql: `SELECT DISTINCT user_id, room_id FROM smcp_vault
@@ -901,7 +824,6 @@ export async function migrateVaultToUserRooms() {
   }));
   await sqlite.batch(stmts);
 
-  // Migrate default flag
   const defaults = await sqlite.execute({
     sql: `SELECT user_id, room_id FROM smcp_vault
           WHERE is_default = 1 AND token_type = 'room'`,
@@ -916,8 +838,6 @@ export async function migrateVaultToUserRooms() {
   }
 }
 
-
-/** Find all active session hashes for a user+client (for transfer during refresh). */
 export async function findSessionsByUserClient(
   userId: string, clientId: string, excludeHash?: string,
 ) {

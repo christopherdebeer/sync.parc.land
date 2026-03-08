@@ -42,6 +42,27 @@ export interface Action {
   registered_by?: string;
 }
 
+export interface RenderHintColumn {
+  key: string;
+  label?: string;
+  width?: string;
+  truncate?: number;
+}
+
+export interface RenderHint {
+  type: "metric" | "markdown" | "array-table" | "view-table" | "json";
+  label?: string;
+  order?: number;
+  group?: string;
+  // metric-specific
+  unit?: string;
+  color?: "default" | "green" | "red" | "yellow";
+  // array-table-specific
+  columns?: RenderHintColumn[];
+  max_rows?: number;
+  layout?: "table" | "event-log";
+}
+
 export interface View {
   id: string;
   room_id: string;
@@ -51,6 +72,7 @@ export interface View {
   value: any;
   version: number;
   registered_by?: string;
+  render?: RenderHint | null;
 }
 
 export interface AuditRow {
@@ -68,7 +90,7 @@ export interface PollData {
   audit: AuditRow[];
 }
 
-export type TokenKind = "room" | "agent";
+export type TokenKind = "room" | "view" | "agent";
 
 // ── Surface types ───────────────────────────────────────────────────────────
 
@@ -153,10 +175,21 @@ export interface SurfaceMarkdown {
   enabled?: string;
 }
 
+export interface SurfaceArrayTable {
+  id: string;
+  type: "array-table";
+  view: string;
+  label?: string;
+  enabled?: string;
+  columns?: RenderHintColumn[];
+  max_rows?: number;
+}
+
 export type Surface =
   | SurfaceMetric
   | SurfaceViewGrid
   | SurfaceViewTable
+  | SurfaceArrayTable
   | SurfaceActionBar
   | SurfaceActionForm
   | SurfaceActionChoice

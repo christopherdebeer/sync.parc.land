@@ -84,6 +84,26 @@ ${meta}
     border-radius: 4px;
     font-size: 0.88em;
   }
+  /* Hydration debug banner — hidden by default, shown by JS if hydration fails */
+  #__HYDRATION_DEBUG__ {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #1a0a0a;
+    border-top: 2px solid #f85149;
+    color: #f85149;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+    padding: 0.75rem 1rem;
+    z-index: 9999;
+    max-height: 40vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  #__HYDRATION_DEBUG__.visible { display: block; }
 </style>
 <script>
   // Apply theme before paint to prevent flash
@@ -98,7 +118,37 @@ ${headScripts}
 <body>
 <div id="root">${html}</div>
 <script id="__PROPS__" type="application/json">${serializedProps}</script>
-<script type="module" src="${entry}"></script>
+<div id="__HYDRATION_DEBUG__"></div>
+<script type="module">
+// ── Hydration loader with visible error reporting ──
+var debugEl = document.getElementById("__HYDRATION_DEBUG__");
+var lines = [];
+function debugLog(msg) {
+  lines.push("[" + new Date().toISOString().slice(11,23) + "] " + msg);
+  if (debugEl) debugEl.textContent = lines.join("\\n");
+}
+// Timeout: if React hasn't signaled alive in 8s, show debug panel
+var hydrationOk = false;
+window.__HYDRATION_OK__ = function() { hydrationOk = true; };
+setTimeout(function() {
+  if (!hydrationOk && debugEl) {
+    debugLog("⚠ hydration timeout — React did not mount within 8s");
+    debugLog("entry: ${entry}");
+    debugLog("lines so far: " + lines.length);
+    debugEl.classList.add("visible");
+  }
+}, 8000);
+debugLog("module loader start");
+debugLog("entry: ${entry}");
+try {
+  await import("${entry}");
+  debugLog("module loaded ok — hydration should be active");
+} catch(e) {
+  debugLog("MODULE LOAD FAILED: " + (e.message || e));
+  debugLog("stack: " + (e.stack || "n/a"));
+  if (debugEl) debugEl.classList.add("visible");
+}
+</script>
 </body>
 </html>`;
 }

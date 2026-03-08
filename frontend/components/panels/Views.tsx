@@ -34,6 +34,33 @@ const ErrorText = styled.span`color: var(--red);`;
 const Meta = styled.div`font-size: 10px; color: var(--dim); margin-top: 4px; word-break: break-word;`;
 const Empty = styled.div`color: var(--dim); font-style: italic; padding: 1rem; text-align: center;`;
 
+const RenderBadge = styled.span`
+  display: inline-block;
+  background: rgba(88,166,255,0.12);
+  color: var(--accent);
+  border: 1px solid rgba(88,166,255,0.25);
+  border-radius: 3px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 5px;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+`;
+
+const RenderHintRow = styled.div`
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 6px;
+`;
+
+const RenderProp = styled.span`
+  color: var(--accent);
+`;
+
 interface ViewsPanelProps {
   views: View[];
 }
@@ -45,7 +72,10 @@ export function ViewsPanel({ views }: ViewsPanelProps) {
     <Grid>
       {views.map(v => (
         <Card key={v.id}>
-          <ViewName>{v.id}</ViewName>
+          <ViewName>
+            {v.id}
+            {v.render && <RenderBadge>{v.render.type}</RenderBadge>}
+          </ViewName>
           {v.description && <Desc>{v.description}</Desc>}
           <Expr>{v.expr}</Expr>
           <ValBox>
@@ -54,6 +84,19 @@ export function ViewsPanel({ views }: ViewsPanelProps) {
               : <JsonView value={v.value} path={`view-${v.id}`} />
             }
           </ValBox>
+          {v.render && (
+            <RenderHintRow>
+              {v.render.label && <span>label: <RenderProp>{v.render.label}</RenderProp></span>}
+              {v.render.order !== undefined && <span>order: <RenderProp>{v.render.order}</RenderProp></span>}
+              {v.render.group && <span>group: <RenderProp>{v.render.group}</RenderProp></span>}
+              {v.render.type === "array-table" && v.render.columns && (
+                <span>cols: <RenderProp>{v.render.columns.map(c => c.label ?? c.key).join(", ")}</RenderProp></span>
+              )}
+              {v.render.type === "metric" && v.render.unit && (
+                <span>unit: <RenderProp>{v.render.unit}</RenderProp></span>
+              )}
+            </RenderHintRow>
+          )}
           <Meta>
             scope: {v.scope} · v{v.version}
             {v.registered_by && ` · by ${v.registered_by}`}

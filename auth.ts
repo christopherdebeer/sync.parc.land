@@ -1,4 +1,5 @@
 import { sqlite } from "https://esm.town/v/std/sqlite";
+import { json } from "./utils.ts";
 
 /**
  * Auth module for agent-sync v5.
@@ -196,16 +197,6 @@ export function touchAgent(roomId: string, agentId: string | null | undefined): 
     args: [agentId, roomId],
   }).catch(() => {});
 }
-
-// ============ Helpers ============
-
-function json(data: any, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
 
 // ============ Direct agent auth (no token required) ============
 

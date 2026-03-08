@@ -2,9 +2,11 @@ import type { Agent } from "./types.ts";
 
 export function esc(s: any): string {
   if (s == null) return "";
-  const d = document.createElement("div");
-  d.textContent = String(s);
-  return d.innerHTML;
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 export function rel(ts: string | null | undefined): string {

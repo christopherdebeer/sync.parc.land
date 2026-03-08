@@ -25,6 +25,8 @@ import {
 
 export interface ManagePageProps {
   origin: string;
+  /** Dashboard origin for vault→dashboard links. Computed server-side. */
+  dashboardOrigin?: string;
 }
 
 // ─── Manage-specific styled components ───────────────────────────
@@ -345,7 +347,7 @@ interface RecoveryToken {
 
 type AuthMode = "signin" | "register";
 
-export function ManagePage({ origin }: ManagePageProps) {
+export function ManagePage({ origin, dashboardOrigin }: ManagePageProps) {
   const [phase, setPhase] = useState<"auth" | "dashboard">("auth");
   const [authMode, setAuthMode] = useState<AuthMode>("signin");
   const [status, setStatus] = useState("");
@@ -596,7 +598,8 @@ export function ManagePage({ origin }: ManagePageProps) {
     roomGroups[e.room_id].push(e);
   }
 
-  const dashBase = origin.replace(/mcp\./, "");
+  // Use server-provided dashboardOrigin, fallback to string replacement
+  const dashBase = dashboardOrigin ?? origin.replace(/mcp\./, "");
 
   return (
     <>
