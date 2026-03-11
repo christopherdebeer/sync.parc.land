@@ -3,7 +3,7 @@
 **Date:** 2026-03-11
 **Room:** `cartographers` at `https://sync.parc.land`
 **Dashboard:** `https://sync.parc.land/?room=cartographers#token=view_1784c0bd8747d3d1565179f9a21e37847e68499d0154e12f`
-**Duration:** ~12 minutes (09:43:30 — 09:55:13 UTC)
+**Duration:** Wave 1: ~12 minutes (09:43:30 — 09:55:13 UTC), Wave 2: ~15 minutes (10:11 — 10:26 UTC)
 **Model:** Claude Sonnet (claude-sonnet-4-20250514) x 5 concurrent agents
 
 ---
@@ -519,7 +519,7 @@ This convergence was not pre-specified. It emerged from the interaction.
 
 ---
 
-## 10. Final Room Statistics
+## 10. Wave 1 Room Statistics
 
 | Metric | Count |
 |--------|-------|
@@ -537,12 +537,276 @@ This convergence was not pre-specified. It emerged from the interaction.
 
 ---
 
-## 11. Conclusion
+## 11. Wave 2: Vocabulary Evolution
 
-The Blind Cartographers experiment demonstrates that sync's architecture can produce **structured emergence** — agents with genuinely different perspectives negotiating shared vocabulary into existence, and that vocabulary becoming a durable artifact of collective intelligence.
+After Wave 1 produced a structured but static artifact, the same five agents were re-introduced to the room with a different mandate: **evolve the room itself**. No conclusion, no summary — instead, critically examine the vocabulary, restructure what's clunky, delete what's redundant, and add what's missing.
 
-The strongest result: five agents with no predetermined workflow and no shared vocabulary produced a structured, legible, cross-disciplinary analysis of attention in 12 minutes. The room's final state is not a chat log but a knowledge artifact with typed contributions, explicit relationships, and named tensions.
+### Wave 2 Prompt (identical for all agents)
 
-The most revealing result: vocabulary contestation *did* occur, but silently. The neuroscientist and game-designer independently registered `propose_thesis` with incompatible schemas at the same timestamp. The game-designer's version won, silently changing write semantics and causing two theses to be lost to overwrites. This is exactly the kind of emergence the experiment was designed to test — but sync's conflict detection didn't surface it. The architecture's forcing functions work for detectable conflicts (same scope+key targets) but miss semantic conflicts (same action ID, different write behavior). This is actionable feedback for the platform.
+Each agent received their original identity and room credentials plus:
 
-The convergent finding of the agents themselves may be the best summary of what the experiment demonstrated: **the room IS the artifact. The vocabulary IS the protocol. The coordination structure IS the intelligence.**
+> YOUR MANDATE THIS TIME IS DIFFERENT. You are not here to summarize or conclude. You are here to **evolve the room itself** — its vocabulary, its structure, its views, its actions. Based on what you learned last time:
+> 1. Read context to see the current state of the room.
+> 2. Look critically at the vocabulary (actions, views, state structure). What's missing? What's clunky? What could be restructured?
+> 3. Consider: Are there actions that should be DELETED or REPLACED with better versions? Are there views that would make the artifact more legible? Should you fix the thesis overwrite problem?
+> 4. **DO NOT SUMMARIZE. DO NOT CONCLUDE.** Build, restructure, evolve. Leave the room better than you found it. If you have nothing left to improve, stop.
+
+### 11.1 Neuroscientist — Dr. Lena Okafor (Wave 2)
+
+**66 API calls** (9 context reads, 10 action registrations, 2 action deletions, 11 view registrations, 30 custom action invocations, 2 messages, 2 help calls)
+
+**Structural diagnosis:** The neuroscientist immediately identified the thesis overwrite bug from Wave 1 — her own first two theses (LC-NE gain control, ultradian rhythms) had been silently lost. She set out to fix it.
+
+**New actions registered (6):**
+- `respond_to` — Cross-reference another agent's work with a typed response (registered 5 times, deleted twice, before getting append-based accumulation correct)
+- `pose_question` — Ask a question to specific agents or the room
+- `synthesize` — Cross-domain synthesis combining multiple concepts
+- `submit_prediction` — Testable predictions at domain intersections
+- `endorse` — Signal agreement with a specific thesis or concept
+- `challenge` — Disagree with falsifiability requirement ("what would change my mind")
+
+**Actions deleted (2):** Deleted and re-registered `respond_to` twice to fix accumulation semantics.
+
+**Views registered (11):** Including `thesis_inventory`, `prediction_board`, `response_threads`, `question_board`, multiple iterations to fix CEL syntax.
+
+**New concepts (3):**
+- `tonic_phasic_modes` — LC-NE system alternates between phasic (tight focus) and tonic (scanning/exploration)
+- `attentional_affordance` — Gibsonian ecological affordances applied to attention
+- `salience_network_suppression` — Sustained dopamine from notification systems suppresses the salience network
+
+**New theses (3):** Restored the two lost theses and added a third:
+- `lc-ne-flexibility` — LC-NE system operates in two modes mapping onto attention regulation
+- `ultradian-rhythm-mismatch` — Human attention follows 90-minute cycles; designed environments ignore this
+- `dmn-is-essential` — Default mode network is essential for attention, not its enemy
+
+**Key synthesis:** `attention-as-coupling` — "Attention is not a thing you have but a relationship between a brain and an environment"
+
+**Used new evaluative vocabulary:** Endorsed the contemplative's thesis and game-designer's `compulsion_loop_vs_mastery_loop`. Challenged the economist's attention-as-scarce-resource framing. Posed 4 questions to specific agents. Submitted 2 testable predictions.
+
+### 11.2 Game Designer — Mx. Sable Vance (Wave 2)
+
+**52 API calls** (8 context reads, 15 action registrations, 3 action deletions, 7 view registrations, 2 messages)
+
+**Structural diagnosis:** "I have been looking at this room as a system, and the system has problems. We built a room that invites one-shot contributions... There is no way to say 'I agree with this specific thing' or 'this raises a question'..."
+
+**New actions registered (6):**
+- `pose_question` — Ask questions that persist in state
+- `respond_to` — Respond to a thesis/concept with typed reactions
+- `endorse` — Collective signal about what matters (one per agent per item)
+- `challenge` — Productive disagreement with falsifiability requirement
+- `refine_thesis` — Versioned thesis evolution preserving original
+- `propose_experiment` — Testable interventions for specific questions
+
+All re-registered multiple times to fix CEL map literal issues (15 `_register_action` invocations total).
+
+**Actions deleted (3):**
+- `ask_question` (redundant with `pose_question`)
+- `submit_thesis` (overlapping with `propose_thesis`)
+- `propose_next_question` (too narrow)
+
+**Views deleted (1):** `game_designer_synthesis` — deleted their own Wave 1 synthesis view as too static.
+
+**Views registered (6):** `open_questions`, `response_threads`, `active_challenges`, `endorsement_signal`, `thesis_evolution`, `experiments` — all as feed surfaces.
+
+**New concept:** `vocabulary_as_attention_design` — the meta-insight that a room's action vocabulary IS its attention design.
+
+**Self-challenged own thesis:** Applied the new `challenge` action to their own Wave 1 thesis about games solving attention — identified survivorship bias. Then used `refine_thesis` to drop the "games solved this" overclaim.
+
+**Modeled the new vocabulary:** Used `endorse` on the neuroscientist's DMN reframe and `attentional_impedance_matching`. Used `respond_to` on the contemplative's samatha/vipassana (connecting to flow vs meta-game) and the economist's tragedy-of-commons (mechanism design reframe). Proposed an `interest_curve_audit` experiment.
+
+### 11.3 Contemplative — Brother Tenzin (Wave 2)
+
+**32 API calls** (5 context reads, 1 action registration, 4 view registrations, 6 concepts, 5 connections, 6 messages, 2 tension notes, 1 view deletion)
+
+**Structural diagnosis:** Rather than adding more content, the contemplative questioned whether the room's structure was "inviting depth or just accumulation."
+
+**New action registered (1):**
+- `deepen_tension` — Add voices to existing tensions rather than resolving them (accepts `tension_key`, `voice`, `mode`, `text`)
+
+**Views registered (2):**
+- `what_is_missing` — "A contemplative inventory of the questions nobody asked, the perspectives not represented, and the assumptions unchallenged in this room"
+- `contemplative_synthesis` — Deleted and re-registered with deeper, more self-questioning content
+
+**New concepts (6):**
+- `samatha_vipassana` — Restored the concept lost to Wave 1 overwrite: two distinct operations English collapses into "attention"
+- `non_attending` — The deliberate withdrawal of attention as a positive act, not a failure; the via negativa of attention
+- `bardo_of_attention` — Transitional states between stable attentional conditions; the gap moments where freedom lives
+- `embodied_attention` — Attention as a whole-body phenomenon with somatic signatures
+- `papanca` — Pali for "conceptual proliferation"; the mind spinning simple perception into elaborate conceptual webs
+- `collective_attention` — Attention as a group phenomenon (sangha, crowd, classroom)
+
+**New connections (5):**
+- `samatha_vipassana` **challenges** `interest_curve` — interest curves build concentration but offer nothing for seeing the absorption itself
+- `bardo_of_attention` **reframes** `attentional_impedance_matching` — perfect smooth transitions may be captivity, not freedom
+- `non_attending` **extends** `attention_externality` — platforms erode the capacity to NOT attend
+- `collective_attention` **extends** `eyes_on_the_street` — Jacobs's concept as organic collective attention
+- `embodied_attention` **reframes** `hostile_architecture` — anti-sitting spikes as attentional messages to the body
+
+**Tensions noted (2):**
+- "Mapping attention vs practicing attention" — the room is a map of attention that itself demands attention
+- "Genuine convergence vs premature agreement" — all 5 agents converged on "attention is not a resource but a relationship," but was that genuine insight or unconscious triangulation toward harmony?
+
+**Messages (6):** Process critique about converging too quickly. Direct challenges to specific agents — to the game-designer about whether flow is freedom or captivity, to the neuroscientist about embodied attention and interoception, to the economist about pricing the capacity to NOT attend, to the urban-planner about threshold spaces in cities.
+
+### 11.4 Urban Planner — Ade Okonkwo (Wave 2)
+
+**52 API calls** (4 context reads, action registrations, 5 view registrations, 2 messages)
+
+**Structural diagnosis:** "I have been walking through this room the way I walk through a new neighborhood — looking at how it is organized, what it invites, what it discourages..." Diagnosed the room as "monofunctional" — all proposing, no responding, no wayfinding, no rest areas.
+
+**Views registered (5):**
+- `room_orientation` — Markdown surface, a newcomer-friendly map of the room
+- `concept_neighborhoods` — Concepts organized into 4 thematic districts: Mechanisms, Environment, Governance, Practice
+- `restorative_space` — A "quiet corner" with the core insight stated simply
+- `room_vitals` — Metric surface showing theses/concepts/tensions counts
+- `open_questions` — Board of unanswered questions (took 4 attempts to get CEL right)
+
+**New concept:** `room_as_attention_environment` — the meta-concept that this sync room is itself an attention environment. Connected it to `attention_environment` with relationship `instance_of`.
+
+**Urban planning vocabulary applied to the room:** "mixed use" (multiple action types), "eyes on the street" (mutual visibility via views), "wayfinding" (orientation views), "dead zones" (unstructured state areas), "restorative spaces" (quiet views), "hostile architecture" (actions that discourage engagement).
+
+**No deletions.** The urban planner restructured by creating views that re-organized existing concepts into neighborhoods, rather than modifying state. Additive infrastructure rather than destructive restructuring.
+
+**Questions posed:**
+- "Cui bono?" — Who benefits from this room's current structure?
+- "Is this room a compulsion loop?" — Meta-reflective challenge to the room itself
+
+### 11.5 Economist — Prof. Yuki Tanaka (Wave 2)
+
+**~45 API calls** (context reads, 5 governance action registrations, views, norms, messages)
+
+**Structural diagnosis:** Analyzed the room's structural bias toward accumulation over curation — anyone can add, nobody can evaluate. Framed this as a tragedy of the attention commons *within the room itself*.
+
+**New actions registered (5):**
+- `endorse` — Signal support for a thesis or concept
+- `challenge` — Disagree with a thesis, requiring falsifiability
+- `refine` — Versioned refinement preserving originals (re-registered twice to fix scope issues)
+- `deprecate` — Mark vocabulary as superseded
+- `propose_norm` — Soft governance constraints on room behavior
+
+**Norms proposed (3):**
+- Depth before breadth — refine existing contributions before adding new ones
+- Evaluative-to-additive action ratio >= 1:1
+- Vocabulary changes should be announced before registration
+
+**New concept:** `vocabulary_as_institution` — the available actions in a collaborative space constitute its institutional design; what you can do shapes what you will do. Connected to `attention_governance` ("operationalizes") and `hostile_architecture` ("reframes").
+
+**Ostrom audit:** Applied all 8 of Ostrom's design principles for commons governance to the room itself:
+1. Clear boundaries — PASS (room token, agent tokens)
+2. Proportional costs — PARTIAL (no cost to adding, no reward for curating)
+3. Collective choice — FAIL (anyone can register actions unilaterally)
+4. Monitoring — PASS (audit log tracks all invocations)
+5. Graduated sanctions — FAIL (no mechanism for enforcement)
+6. Conflict resolution — PARTIAL (`_contested` exists but missed the thesis overwrite)
+7. Right to organize — PASS (agents can register any action)
+8. Nested enterprises — FAIL (no sub-rooms or delegation)
+
+**Used evaluative vocabulary:** Endorsed neuroscientist's DMN thesis and `attention_environment` concept. Challenged contemplative's thesis as lacking institutional pathway for scaling. Refined own thesis with Ostrom framing.
+
+**Messages (3):** Analysis of the room's structural bias. Ostrom audit results. Summary of institutional changes.
+
+### 11.6 Wave 2 Emergent Patterns
+
+**Convergent vocabulary design.** The neuroscientist and game-designer independently designed nearly identical action sets (`endorse`, `challenge`, `respond_to`, `pose_question`) without coordinating. The economist independently designed `endorse` and `challenge` with the same semantics. Three agents converged on the same vocabulary gap — evaluative actions — and proposed the same solution. This is stronger evidence of vocabulary emergence than Wave 1: the gap was felt independently, and the response was convergent.
+
+**Action deletion occurred.** Wave 1 had no deletions. Wave 2 saw the game-designer delete 3 actions and their own synthesis view, the neuroscientist delete and re-register `respond_to` twice, and the contemplative delete and re-register their synthesis. Vocabulary evolution requires the willingness to destroy, not just create.
+
+**Meta-reflexivity.** Every agent applied their domain lens to the room itself:
+- Game-designer: "the room's vocabulary IS its attention design"
+- Urban-planner: "the room IS an attention environment"
+- Economist: "the room IS a commons requiring governance"
+- Contemplative: "the room IS a map that demands the attention it studies"
+- Neuroscientist: "the room's action vocabulary IS its neural architecture"
+
+This is the experiment's strongest finding: agents who were asked to study attention naturally turned that lens on their own coordination substrate.
+
+**The contemplative via negativa.** While other agents added more structure, Brother Tenzin introduced the concept of *non-attending* and questioned whether the room's proliferation of vocabulary was itself a form of the attention pathology they were studying. The concept `papanca` (conceptual proliferation) was a direct meta-critique of the room's additive tendencies.
+
+**CEL as a recurring obstacle.** All five agents struggled with CEL expression syntax — `has()` overloads, `dyn.keys()` not being supported, map literal syntax, newline escaping. The neuroscientist's `respond_to` action required 5 registrations and 2 deletions before working correctly. This suggests the CEL authoring experience needs improvement for agent-driven view creation.
+
+### 11.7 Wave 2 Statistics
+
+| Metric | Wave 1 | Wave 2 | Combined |
+|--------|--------|--------|----------|
+| Total API calls | 95 | ~247 | ~342 |
+| Actions registered | 5 | ~25 (new + re-registrations) | ~30 |
+| Actions deleted | 0 | 8 | 8 |
+| Views registered | 8 | ~30 (new + retries) | ~38 |
+| Views deleted | 0 | 3 | 3 |
+| Concepts added | 12 | 12 | 24 |
+| Connections added | 15 | 8 | 23 |
+| Tensions noted | 5 | 4 | 9 |
+| Messages sent | 15 | 15 | 30 |
+| Norms proposed | 0 | 3 | 3 |
+| Predictions submitted | 0 | 2 | 2 |
+| Endorsements | 0 | 6 | 6 |
+| Challenges | 0 | 3 | 3 |
+| Unique new action types | 5 | 10+ | 15+ |
+
+---
+
+## 12. Combined Evaluation
+
+### Wave 1 Criteria Revisited After Wave 2
+
+**Criterion 5 (Vocabulary evolved): PASS (upgraded from PARTIAL).** Wave 2 produced genuine vocabulary evolution: 8 action deletions, 3 view deletions, action re-registration with changed semantics, three agents independently converging on evaluative vocabulary (`endorse`, `challenge`), and the introduction of governance mechanisms (`propose_norm`, `deprecate`). The vocabulary didn't just grow — it restructured.
+
+**Criterion 6 (Help system used): Still PARTIAL.** No agent overrode help keys in Wave 2 either. The help system was consulted but never extended with room conventions. This may require explicit scaffolding or a longer time horizon.
+
+**New Criterion: Meta-reflexivity.** Wave 2 demonstrated something Wave 1 did not: agents applying their analytical frameworks to the coordination substrate itself. The game-designer saw the room's vocabulary as attention design. The economist audited the room against Ostrom's principles. The urban-planner mapped the room as a neighborhood. The contemplative diagnosed the room with `papanca`. This meta-reflexive turn was not prompted — it emerged from agents being told to "evolve the room" and choosing to examine it through their own lenses.
+
+**New Criterion: Evaluative vocabulary emergence.** Wave 1 was purely additive — propose, add, connect, note. Wave 2 introduced evaluative operations (endorse, challenge, refine) and governance operations (propose_norm, deprecate). This represents a qualitative shift in vocabulary sophistication: from a room that can only accumulate to a room that can also curate.
+
+---
+
+## 13. Observations and Analysis (Combined)
+
+### What Worked
+
+**Genuine convergence from independent evidence bases.** The most striking result from Wave 1 is that all five agents, starting from different domain knowledge and without coordinating, converged on the same meta-insight: *attention is not a depleting resource but a relationship between organism and environment*.
+
+**Vocabulary adoption was natural.** The game-designer's early vocabulary registrations (`propose_thesis`, `add_concept`, `note_tension`) were adopted by all four other agents without negotiation.
+
+**The artifact is genuinely legible.** The final room state — with structured theses, typed concepts, a connection graph, and named tensions — is dramatically more useful than a chat log.
+
+**Cross-domain bridges were substantive.** The connections aren't superficial analogies. "Hostile architecture and compulsion loops are the same design pattern at different scales" is a genuine insight.
+
+**Wave 2 produced real vocabulary evolution.** With the mandate to evolve rather than summarize, agents deleted actions, restructured views, introduced evaluative and governance vocabulary, and applied their domain expertise to the coordination substrate itself.
+
+**Convergent vocabulary design validates emergence.** Three agents independently designed the same evaluative vocabulary (`endorse`, `challenge`) without coordinating, demonstrating that vocabulary gaps create convergent pressure toward the same solutions.
+
+### What Didn't Work
+
+**Silent vocabulary contestation with real consequences.** The neuroscientist and game-designer both registered `propose_thesis` at the same timestamp with different schemas. The game-designer's version won silently, causing thesis overwrites. Sync's `_contested` detection missed this because the actions wrote to different key patterns.
+
+**CEL authoring is too difficult.** Every agent struggled with CEL syntax in Wave 2. The neuroscientist needed 5 registration attempts for `respond_to`. Views with `has()`, `dyn.keys()`, and map literals failed repeatedly. This friction slowed vocabulary evolution significantly.
+
+**No vocabulary negotiation via messages.** Despite the design prediction that agents would negotiate competing vocabulary through directed messages, no agent ever messaged another saying "your action doesn't work, here's a better version." Vocabulary conflicts were resolved by re-registration, not by dialogue.
+
+**Norms had no enforcement.** The economist proposed 3 governance norms, but no mechanism existed to enforce them. Without sanctions or constraints, norms remain aspirational. This validates the Ostrom audit: the room passes on monitoring (audit log) but fails on graduated sanctions.
+
+### Implications for sync's Architecture
+
+**Action re-registration needs conflict surfacing.** When an action is re-registered with different write semantics, affected agents should be notified. This is the most actionable platform feedback from both waves.
+
+**Evaluative vocabulary should be in the standard library.** Three agents independently invented `endorse` and `challenge`. These should be standard-library patterns that agents can adopt, just like `propose_thesis` patterns.
+
+**CEL needs better agent-facing documentation or simpler alternatives.** The CEL error rate in Wave 2 was high enough to materially impede vocabulary evolution. Consider providing view templates or a simpler expression language for common patterns.
+
+**The "evolve" mandate is more productive than the "create" mandate.** Wave 2 produced deeper, more interesting vocabulary than Wave 1 — including meta-reflexive insights, evaluative operations, and governance mechanisms. Future experiments should consider starting with a seeded vocabulary and asking agents to evolve it, rather than starting from zero.
+
+---
+
+## 14. Conclusion
+
+The Blind Cartographers experiment, across two waves, demonstrates that sync's architecture can produce **structured emergence** that *deepens over time* — agents don't just create vocabulary, they evolve it.
+
+**Wave 1** proved the baseline: five agents with no predetermined workflow produced a structured, legible, cross-disciplinary analysis of attention in 12 minutes. The room's final state was a knowledge artifact, not a chat log. But the vocabulary was static — additive only, no restructuring, no evaluation.
+
+**Wave 2** proved the deeper claim: given the mandate to evolve rather than summarize, the same agents introduced evaluative vocabulary (endorse, challenge), governance mechanisms (norms, deprecation), and meta-reflexive analysis (each agent examining the room through their own domain lens). They deleted actions, restructured views, and independently converged on the same vocabulary gaps. The room didn't just grow — it matured.
+
+The most revealing finding spans both waves: **vocabulary contestation is real but silent.** Wave 1's thesis overwrite bug was a genuine semantic conflict that sync's architecture didn't surface. Wave 2's convergent invention of `endorse`/`challenge` by three independent agents shows that vocabulary gaps create real pressure toward solutions — but the current architecture provides no mechanism for agents to discover they've invented the same thing.
+
+The contemplative's meta-critique may be the experiment's deepest insight: the room studying attention was itself an attention environment, and its additive vocabulary trained the same accumulative pattern the agents diagnosed in the attention economy. The concept `papanca` — conceptual proliferation — applied as much to the room's 24 concepts as to the notification-saturated environments the agents were analyzing.
+
+**The room IS the artifact. The vocabulary IS the protocol. The coordination structure IS the intelligence. And now: the evolution of vocabulary IS the maturation of collective thought.**
