@@ -129,9 +129,15 @@ interface MessagesPanelProps {
   roomId: string;
   baseUrl: string;
   authHeaders: () => Record<string, string>;
+  /** When false, disables auto-scroll entirely (e.g. in replay mode). Default true. */
+  autoScroll?: boolean;
 }
 
-export function MessagesPanel({ messages, agentMap, roomId, baseUrl, authHeaders }: MessagesPanelProps) {
+// Threshold in px — if the user has scrolled up more than this, don't auto-scroll.
+const SCROLL_THRESHOLD = 80;
+
+export function MessagesPanel({ messages, agentMap, roomId, baseUrl, authHeaders, autoScroll = true }: MessagesPanelProps) {
+  const logRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [msgText, setMsgText] = useState("");
   const [msgKind, setMsgKind] = useState("chat");
@@ -139,8 +145,15 @@ export function MessagesPanel({ messages, agentMap, roomId, baseUrl, authHeaders
   const [error, setError] = useState("");
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+    if (!autoScroll) return;
+    const log = logRef.current;
+    if (!log) return;
+    // Only scroll if the user is already near the bottom
+    const distanceFromBottom = log.scrollHeight - log.scrollTop - log.clientHeight;
+    if (distanceFromBottom <= SCROLL_THRESHOLD) {
+      bottomRef.current?.scrollIntoView({ behavior: "instant" });
+    }
+  }, [messages.length, autoScroll]);
 
   const sendMessage = useCallback(async () => {
     const body = msgText.trim();
@@ -170,7 +183,7 @@ export function MessagesPanel({ messages, agentMap, roomId, baseUrl, authHeaders
     <Wrap>
       {!messages.length && <Empty>no messages</Empty>}
       {messages.length > 0 && (
-        <Log>
+        <Log ref={logRef}>
           {messages.map(m => {
             let v = tryParseJson(m.value);
             if (typeof v !== "object" || v === null) v = { body: String(m.value) };
@@ -222,7 +235,8 @@ function renderMarkdown(text: string): string {
   if (typeof (globalThis as any).marked !== "undefined") {
     return (globalThis as any).marked.parse(text, { breaks: true, gfm: true });
   }
-  const d = document.createElement("div");
-  d.textContent = text;
-  return d.innerHTML.replace(/\n/g, "<br>");
+  // SSR-safe fallback: escape HTML without document.createElement
+  return text
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/\n/g, "<br>");
 }
