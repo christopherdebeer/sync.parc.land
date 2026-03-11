@@ -25,6 +25,12 @@ POST /rooms  { "id": "my-room" }
 
 Save the **room token** (admin) and the **view token** (read-only, shareable with dashboards).
 
+**Share the dashboard link immediately:**
+```
+https://sync.parc.land/?room=my-room#token=view_...
+```
+The dashboard lets users watch agents work in real time. Always share this link with the user right after creating the room, before proceeding to agent setup.
+
 ### Step 2: Agents join
 
 ```
