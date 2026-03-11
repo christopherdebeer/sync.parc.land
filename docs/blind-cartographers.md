@@ -443,7 +443,14 @@ Each agent registered a markdown surface summarizing what they built together. T
 **PASS.** No agent's system prompt contained action definitions. All vocabulary (`propose_thesis`, `add_concept`, `add_connection`, `note_tension`, `update_objective`) was registered at runtime by agents consulting the standard library and making independent design choices. The neuroscientist and game-designer independently registered `propose_thesis` — a convergent design choice, not a coordinated one.
 
 ### Criterion 2: At least one contestation was productively resolved
-**PARTIAL.** Both neuroscientist and game-designer registered `propose_thesis`, which writes to the same `_shared.theses.*` keyspace. The game-designer's registration won (as the first to succeed with that id). Both agents used the action successfully — the contestation was resolved through adoption rather than explicit negotiation. The five registered tensions represent productive intellectual contestation (different from the technical vocabulary contestation the criterion envisioned).
+**PARTIAL — but more interesting than initially apparent.** The transcript analysis reveals that both the neuroscientist and game-designer registered `propose_thesis` at nearly the same timestamp (09:44:50), but with **different schemas**:
+
+- **Neuroscientist's version:** params `claim`/`evidence`/`domain`, with `append: true` writes to a flat `theses` list
+- **Game-designer's version:** params `thesis`/`evidence`/`domain`, with keyed writes to `theses.${self}`
+
+The game-designer's version won (version 2 overwriting version 1). This had a silent but consequential effect: the neuroscientist proposed three theses (LC-NE gain control, ultradian rhythms, DMN) expecting them to accumulate as a list, but because the game-designer's keyed-write version was active, each invocation **overwrote the previous** at `theses.neuroscientist`. Only the DMN thesis survived. The same happened to the contemplative — their samatha/vipassana thesis was overwritten by their monitoring-function thesis.
+
+This is vocabulary contestation that produced real consequences, but it was **silent** — no `_contested` warning fired because the actions wrote to different key patterns, and the affected agents never realized their earlier theses were lost. This suggests sync's conflict detection (which watches for overlapping `(scope, key)` targets) may need to also detect when an action re-registration changes write behavior for existing invokers.
 
 ### Criterion 3: Room's final state is a legible artifact
 **PASS.** The dashboard shows:
@@ -494,7 +501,7 @@ This convergence was not pre-specified. It emerged from the interaction.
 
 ### What Didn't Work (Or Didn't Happen)
 
-**No vocabulary contestation.** The experiment design predicted agents would register competing vocabulary and negotiate via directed messages. Instead, the game-designer's vocabulary was universally adopted. This may be because: (a) the vocabulary was genuinely well-designed for the task; (b) 5 concurrent agents in 12 minutes is not enough time for vocabulary pressure to build; (c) agents defaulted to cooperation over contestation.
+**Silent vocabulary contestation with real consequences.** The experiment design predicted agents would register competing vocabulary and negotiate via directed messages. What actually happened was subtler and more revealing: the neuroscientist and game-designer both registered `propose_thesis` within the same second, with different schemas. The game-designer's version silently won, changing the write behavior from append-to-list to keyed-by-agent. This caused the neuroscientist's first two theses (LC-NE gain control and ultradian rhythms) and the contemplative's first thesis (samatha/vipassana collapse) to be silently overwritten by subsequent invocations. Neither agent noticed. This is a genuine vocabulary contestation — but one that was resolved by last-write-wins rather than by negotiation. The `_contested` system didn't fire because the two action definitions wrote to different key patterns, not the same `(scope, key)` target. This suggests a gap in sync's conflict detection: re-registering an action with different write semantics is a form of contestation that the current architecture doesn't surface.
 
 **No help system overrides.** No agent wrote room-specific conventions to the help system. The built-in help was consulted but never extended.
 
@@ -536,6 +543,6 @@ The Blind Cartographers experiment demonstrates that sync's architecture can pro
 
 The strongest result: five agents with no predetermined workflow and no shared vocabulary produced a structured, legible, cross-disciplinary analysis of attention in 12 minutes. The room's final state is not a chat log but a knowledge artifact with typed contributions, explicit relationships, and named tensions.
 
-The weakest result: vocabulary contestation and restructuring — the most ambitious form of emergence — did not occur. Agents cooperated rather than contested, adopted rather than negotiated. Whether this reflects a limitation of the architecture, the short runtime, or a genuine property of well-designed vocabulary (it worked, so nobody needed to fight about it) is an open question for future experiments.
+The most revealing result: vocabulary contestation *did* occur, but silently. The neuroscientist and game-designer independently registered `propose_thesis` with incompatible schemas at the same timestamp. The game-designer's version won, silently changing write semantics and causing two theses to be lost to overwrites. This is exactly the kind of emergence the experiment was designed to test — but sync's conflict detection didn't surface it. The architecture's forcing functions work for detectable conflicts (same scope+key targets) but miss semantic conflicts (same action ID, different write behavior). This is actionable feedback for the platform.
 
 The convergent finding of the agents themselves may be the best summary of what the experiment demonstrated: **the room IS the artifact. The vocabulary IS the protocol. The coordination structure IS the intelligence.**
