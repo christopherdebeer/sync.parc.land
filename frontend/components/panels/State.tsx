@@ -1,7 +1,7 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
 import { useState, useRef } from "https://esm.sh/react@18.2.0";
 import { styled, keyframes } from "../../styled.ts";
-import type { StateRow, Agent } from "../../types.ts";
+import type { StateRow, Agent, TokenKind } from "../../types.ts";
 import { JsonView } from "../JsonView.tsx";
 import { rel } from "../../utils.ts";
 
@@ -87,7 +87,7 @@ const Wrap = styled.div<{ $dimmed?: boolean }>`
   opacity: ${p => p.$dimmed ? 0.4 : 1};
 `;
 
-function canSeeScope(scope: string, tokenKind: "room" | "agent" | null, viewingId: string | undefined, agentMap: Record<string, Agent>): boolean {
+function canSeeScope(scope: string, tokenKind: TokenKind | null, viewingId: string | undefined, agentMap: Record<string, Agent>): boolean {
   if (tokenKind === "room" && !viewingId) return true;
   const aid = viewingId;
   if (!aid) return true;
@@ -152,7 +152,7 @@ interface StatePanelProps {
   rows: StateRow[];
   agentMap: Record<string, Agent>;
   viewingId?: string;
-  tokenKind: "room" | "agent" | null;
+  tokenKind: TokenKind | null;
 }
 
 export function StatePanel({ rows, agentMap, viewingId, tokenKind }: StatePanelProps) {

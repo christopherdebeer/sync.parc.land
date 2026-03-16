@@ -103,7 +103,6 @@ ${meta}
     white-space: pre-wrap;
     word-break: break-all;
   }
-  #__HYDRATION_DEBUG__.visible { display: block; }
 </style>
 <script>
   // Apply theme before paint to prevent flash
@@ -120,24 +119,19 @@ ${headScripts}
 <body>
 <div id="root">${html}</div>
 <script id="__PROPS__" type="application/json">${serializedProps}</script>
-<div id="__HYDRATION_DEBUG__"></div>
 <script type="module">
-// ── Hydration loader with visible error reporting ──
-var debugEl = document.getElementById("__HYDRATION_DEBUG__");
 var lines = [];
 function debugLog(msg) {
-  lines.push("[" + new Date().toISOString().slice(11,23) + "] " + msg);
-  if (debugEl) debugEl.textContent = lines.join("\\n");
+  console.log("[" + new Date().toISOString().slice(11,23) + "] " + msg);
 }
 // Timeout: if React hasn't signaled alive in 8s, show debug panel
 var hydrationOk = false;
 window.__HYDRATION_OK__ = function() { hydrationOk = true; };
 setTimeout(function() {
-  if (!hydrationOk && debugEl) {
+  if (!hydrationOk) {
     debugLog("⚠ hydration timeout — React did not mount within 8s");
     debugLog("entry: ${entry}");
     debugLog("lines so far: " + lines.length);
-    debugEl.classList.add("visible");
   }
 }, 8000);
 debugLog("module loader start");
@@ -148,7 +142,6 @@ try {
 } catch(e) {
   debugLog("MODULE LOAD FAILED: " + (e.message || e));
   debugLog("stack: " + (e.stack || "n/a"));
-  if (debugEl) debugEl.classList.add("visible");
 }
 </script>
 </body>

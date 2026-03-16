@@ -72,7 +72,7 @@ import {
   handleConsentPage,
   handleConsentRooms,
   handleElevatePage,
-} from "./mcp/elevate.ts";
+} from "./mcp/elevate.tsx";
 import {
   handleClaim,
   handleInvite,

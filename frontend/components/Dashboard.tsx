@@ -559,6 +559,56 @@ export function Dashboard({ roomId }: DashboardProps) {
     if (typeof window !== "undefined" && window.PublicKeyCredential) setHasPasskeyOption(true);
   }, [roomId]);
 
+  // ── Derived data (must be above early returns to satisfy Rules of Hooks) ──
+
+  const derivedAgents = useMemo(() => data ? agentsFromState(data) : [], [data]);
+  const derivedActions = useMemo(() => data ? actionsFromState(data) : [], [data]);
+  const derivedMessages = useMemo(() => data ? messagesFromState(data) : [], [data]);
+
+  const panelAgents = useMemo(() => derivedAgents.map(a => ({
+    id: a.id, name: a.def.name, role: a.def.role, status: a.def.status,
+    last_heartbeat: a.def.last_heartbeat ?? "", grants: JSON.stringify(a.def.grants),
+    joined_at: a.def.joined_at ?? "",
+  })), [derivedAgents]);
+
+  const panelState = useMemo(() => {
+    if (!data) return [];
+    return data.state.filter(s => s.scope !== "_audit").map(s => ({
+      room_id: "", scope: s.scope, key: s.key, value: s.value,
+      version: s.revision, sort_key: s.sort_key ?? undefined, updated_at: s.updated_at,
+    }));
+  }, [data]);
+
+  const panelMessages = useMemo(() =>
+    derivedMessages.map(m => ({ sort_key: m.sort_key ?? 0, value: m.value, updated_at: m.updated_at })),
+  [derivedMessages]);
+
+  const panelActions = useMemo(() => derivedActions.map(a => ({
+    id: a.id, room_id: "", scope: a.def.scope ?? "_shared",
+    description: a.def.description, available: a.available,
+    params: a.def.params, writes: a.def.writes, version: 1,
+    registered_by: a.def.registered_by, if: a.def.if,
+  })), [derivedActions]);
+
+  const panelViews = useMemo(() => derivedViews.map(v => ({
+    id: v.id, room_id: "", scope: v.def.scope ?? "_shared",
+    description: v.def.description, expr: v.def.expr,
+    value: v.value, version: 1, registered_by: v.def.registered_by,
+    render: v.def.render ?? null,
+  })), [derivedViews]);
+
+  const panelAudit = useMemo(() =>
+    data?.audit.map(a => ({ sort_key: a.seq, value: a.value, updated_at: a.updated_at })) ?? [],
+  [data]);
+
+  const activeAgents = derivedAgents.filter(a => a.def.status === "active").length;
+  const waitingAgents = derivedAgents.filter(a => a.def.status === "waiting").length;
+  const stateCount = data?.state.filter(s => !s.scope.startsWith("_")).length ?? 0;
+  const scopeCount = data ? allScopes(data).length : 0;
+  const viewingId = viewAs || undefined;
+  const titleText = dashConfig?.title || "agent-sync";
+  const subtitleText = dashConfig?.subtitle || roomId;
+
   // ── Auth gate ─────────────────────────────────────────────────────────────
 
   if (!token) {
@@ -604,97 +654,8 @@ export function Dashboard({ roomId }: DashboardProps) {
 
   // ── Authenticated dashboard ───────────────────────────────────────────────
 
-  // v8-DIAG: minimal render to isolate the crash
-  if (data) {
-    return (
-      <div style={{ padding: "2rem", fontFamily: "monospace", fontSize: "13px", background: "#0d1117", color: "#c9d1d9", minHeight: "100vh" }}>
-        <div style={{ color: "#58a6ff", fontWeight: 600, marginBottom: "1rem" }}>v8 dashboard diagnostic — {roomId}</div>
-        <div>token: {String(tokenKind)} · poll: {String(pollStatus)}</div>
-        <div>state: {data.state?.length ?? "?"} · audit: {data.audit?.length ?? "?"}</div>
-        <div>views: {data.state?.filter((s: any) => s.scope === "_views").length} · agents: {data.state?.filter((s: any) => s.scope === "_agents").length}</div>
-        <div style={{ marginTop: "1rem", color: "#3fb950" }}>If you see this, hooks work. The crash is in the full render tree below.</div>
-        <div style={{ marginTop: "1rem" }}><span onClick={doLogout} style={{ color: "#f85149", cursor: "pointer" }}>disconnect</span></div>
-      </div>
-    );
-  }
+  if (!data) return <div style={{ padding: "2rem", color: "#484f58" }}>waiting for data…</div>;
 
-  return <div style={{ padding: "2rem", color: "#484f58" }}>waiting for data…</div>;
-  const derivedAgents = useMemo(() => data ? agentsFromState(data) : [], [data]);
-  const derivedActions = useMemo(() => data ? actionsFromState(data) : [], [data]);
-  const derivedMessages = useMemo(() => data ? messagesFromState(data) : [], [data]);
-
-  // Panel-compatible arrays (matching legacy component interfaces)
-  const panelAgents = useMemo(() => derivedAgents.map(a => ({
-    id: a.id, name: a.def.name, role: a.def.role, status: a.def.status,
-    last_heartbeat: a.def.last_heartbeat ?? "", grants: JSON.stringify(a.def.grants),
-    joined_at: a.def.joined_at ?? "",
-  })), [derivedAgents]);
-
-  const panelState = useMemo(() => {
-    if (!data) return [];
-    return data.state.filter(s => s.scope !== "_audit").map(s => ({
-      room_id: "", scope: s.scope, key: s.key, value: s.value,
-      version: s.revision, sort_key: s.sort_key ?? undefined, updated_at: s.updated_at,
-    }));
-  }, [data]);
-
-  const panelMessages = useMemo(() =>
-    derivedMessages.map(m => ({ sort_key: m.sort_key ?? 0, value: m.value, updated_at: m.updated_at })),
-  [derivedMessages]);
-
-  const panelActions = useMemo(() => derivedActions.map(a => ({
-    id: a.id, room_id: "", scope: a.def.scope ?? "_shared",
-    description: a.def.description, available: a.available,
-    params: a.def.params, writes: a.def.writes, version: 1,
-    registered_by: a.def.registered_by, if: a.def.if,
-  })), [derivedActions]);
-
-  const panelViews = useMemo(() => derivedViews.map(v => ({
-    id: v.id, room_id: "", scope: v.def.scope ?? "_shared",
-    description: v.def.description, expr: v.def.expr,
-    value: v.value, version: 1, registered_by: v.def.registered_by,
-    render: v.def.render ?? null,
-  })), [derivedViews]);
-
-  const panelAudit = useMemo(() =>
-    data?.audit.map(a => ({ sort_key: a.seq, value: a.value, updated_at: a.updated_at })) ?? [],
-  [data]);
-
-  const activeAgents = derivedAgents.filter(a => a.def.status === "active").length;
-  const waitingAgents = derivedAgents.filter(a => a.def.status === "waiting").length;
-  const stateCount = data?.state.filter(s => !s.scope.startsWith("_")).length ?? 0;
-  const scopeCount = data ? allScopes(data).length : 0;
-  const viewingId = viewAs || undefined;
-  const titleText = dashConfig?.title || "agent-sync";
-  const subtitleText = dashConfig?.subtitle || roomId;
-
-  // v8-debug: minimal render to isolate crash
-  // Comment this block out once the issue is found
-  return (
-    <div style={{ padding: "2rem", fontFamily: "monospace", fontSize: "13px", background: "#0d1117", color: "#c9d1d9", minHeight: "100vh" }}>
-      <h2 style={{ color: "#58a6ff" }}>Dashboard loaded ✓</h2>
-      <div style={{ color: "#484f58", marginBottom: "1rem" }}>room: {roomId} · token: {tokenKind} · poll: {pollStatus}</div>
-      <div>agents: {derivedAgents.length}</div>
-      <div>actions: {derivedActions.length}</div>
-      <div>views: {derivedViews.length}</div>
-      <div>messages: {derivedMessages.length}</div>
-      <div>state entries: {data?.state.length ?? 0}</div>
-      <div>audit entries: {data?.audit.length ?? 0}</div>
-      <div>hasSurfaces: {String(hasSurfaces)}</div>
-      <div>activeSurfaces: {activeSurfaces.length}</div>
-      <div style={{ marginTop: "1rem", color: "#484f58" }}>
-        If you see this, hooks + data are fine. The crash is in the JSX render tree.
-      </div>
-      <pre style={{ marginTop: "1rem", fontSize: "10px", color: "#484f58", maxHeight: "300px", overflow: "auto" }}>
-        {JSON.stringify({ panelAgents: panelAgents.slice(0, 2), panelActions: panelActions.slice(0, 2) }, null, 2)}
-      </pre>
-      <div style={{ marginTop: "1rem" }}>
-        <button onClick={doLogout} style={{ background: "#161b22", border: "1px solid #21262d", color: "#c9d1d9", padding: "0.5rem 1rem", borderRadius: "6px", cursor: "pointer", fontFamily: "inherit" }}>disconnect</button>
-      </div>
-    </div>
-  );
-
-  /* ORIGINAL RETURN — temporarily bypassed
   return (
     <Page>
       <Nav active="dashboard" />
@@ -769,5 +730,4 @@ export function Dashboard({ roomId }: DashboardProps) {
       </Main>
     </Page>
   );
-  END OF ORIGINAL RETURN */
 }
