@@ -1,8 +1,12 @@
 /**
  * replay.ts — Time-travel replay for sync rooms.
  *
- * Reconstructs room state (PollData shape) by replaying _audit entries
+ * Reconstructs room state by replaying _audit entries (state table, _audit scope)
  * up to a given sequence number. Used by the /rooms/:id/replay/:seq endpoint.
+ *
+ * v8: Already reads exclusively from state table (no legacy table dependencies).
+ * Audit entries contain full structural events — agent_join, register_action,
+ * register_view, invoke with writes — everything needed for reconstruction.
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";

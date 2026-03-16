@@ -3,7 +3,11 @@ import { evaluate } from "npm:@marcbachmann/cel-js";
 import { isTimerLive } from "./timers.ts";
 
 /**
- * CEL (Common Expression Language) evaluator for agent-sync v5.
+ * CEL (Common Expression Language) evaluator for agent-sync v8.
+ *
+ * v8: All entity data (agents, actions, views) read from state table scopes.
+ * Legacy table fallbacks removed — v8 backfill ensures all rooms have scope data.
+ * The agents table is retained for auth (token_hash) and unread tracking (last_seen_seq).
  *
  * Context shape (per-agent, respecting scope privacy):
  *
@@ -100,30 +104,24 @@ export async function buildContext(roomId: string, opts: BuildContextOptions = {
     state[contextScope][row.key] = parseValue(row.value);
   }
 
-  // Load agents (public presence only)
-  const agentResult = await sqlite.execute({
-    sql: `SELECT id, name, role, status, waiting_on, last_heartbeat, last_seen_seq, enabled_expr FROM agents WHERE room_id = ?`,
-    args: [roomId],
-  });
-  const agentRows = rows2objects(agentResult) as any[];
-
+  // v8: Extract agents from _agents scope (already in stateRows)
   const agents: Record<string, any> = {};
-  const deferredAgents: { id: string; data: any; enabled_expr: string }[] = [];
 
-  for (const a of agentRows) {
-    const data = {
-      name: a.name,
-      role: a.role,
-      status: a.status || "unknown",
-      waiting_on: a.waiting_on || null,
-      last_heartbeat: a.last_heartbeat || null,
+  for (const row of stateRows) {
+    if (row.scope !== "_agents") continue;
+    if (!isTimerLive(row)) continue;
+    const val = parseValue(row.value);
+    agents[row.key] = {
+      name: val.name ?? row.key,
+      role: val.role ?? "agent",
+      status: val.status ?? "active",
+      waiting_on: val.waiting_on ?? null,
+      last_heartbeat: val.last_heartbeat ?? null,
     };
-    if (a.enabled_expr) {
-      deferredAgents.push({ id: a.id, data, enabled_expr: a.enabled_expr });
-      continue;
-    }
-    agents[a.id] = data;
   }
+
+  // Fallback removed — v8 backfill ensures all rooms have _agents scope data.
+  // If _agents scope is empty, the room has no agents (which is valid).
 
   // Message counts from _messages scope
   const countResult = await sqlite.execute({
@@ -141,8 +139,15 @@ export async function buildContext(roomId: string, opts: BuildContextOptions = {
   let unreadCount = 0;
   let directedUnread = 0;
   if (selfAgent) {
-    const agent = agentRows.find(a => a.id === selfAgent);
-    const lastSeen = agent?.last_seen_seq ?? 0;
+    // v8: Read last_seen_seq from _agents scope
+    let lastSeen = 0;
+    try {
+      const agentEntry = stateRows.find(r => r.scope === "_agents" && r.key === selfAgent);
+      if (agentEntry) {
+        const val = parseValue(agentEntry.value);
+        lastSeen = val.last_seen_seq ?? 0;
+      }
+    } catch {}
     const unreadResult = await sqlite.execute({
       sql: `SELECT COUNT(*) as c FROM state WHERE room_id = ? AND scope = '_messages' AND sort_key > ?
             AND (timer_effect IS NULL
@@ -168,24 +173,21 @@ export async function buildContext(roomId: string, opts: BuildContextOptions = {
     }
   }
 
-  // Load actions for context
-  const actionResult = await sqlite.execute({
-    sql: `SELECT id, if_expr, enabled_expr, timer_effect, timer_expires_at, timer_ticks_left FROM actions WHERE room_id = ?`,
-    args: [roomId],
-  });
-  const actionRows = rows2objects(actionResult) as any[];
-
+  // v8: Extract actions from _actions scope (already in stateRows)
   const actionsCtx: Record<string, any> = {};
-  const deferredActions: { id: string; if_expr: string | null; enabled_expr: string }[] = [];
 
-  for (const a of actionRows) {
-    if (!isTimerLive(a)) continue;
-    if (a.enabled_expr) {
-      deferredActions.push({ id: a.id, if_expr: a.if_expr, enabled_expr: a.enabled_expr });
-      continue;
+  for (const row of stateRows) {
+    if (row.scope !== "_actions") continue;
+    if (!isTimerLive(row)) continue;
+    const val = parseValue(row.value);
+    // _actions scope entries have enabled/if as fields in the value JSON
+    if (val.enabled) {
+      try { if (!evaluate(val.enabled, { state, views: {}, agents, messages: { count: 0, unread: 0, directed_unread: 0 }, actions: {}, self: selfAgent ?? "", params: {} })) continue; } catch { continue; }
     }
-    actionsCtx[a.id] = { enabled: true };
+    actionsCtx[row.key] = { enabled: true, if_expr: val.if ?? null };
   }
+
+  // Fallback removed — v8 backfill ensures all rooms have _actions scope data.
 
   // Build initial context (without deferred items or views)
   const ctx: Record<string, any> = {
@@ -198,7 +200,7 @@ export async function buildContext(roomId: string, opts: BuildContextOptions = {
     params: {},
   };
 
-  // Resolve deferred enabled expressions
+  // Resolve deferred enabled state entries
   for (const d of deferredEnabled) {
     try {
       if (evaluate(d.enabled_expr, ctx)) {
@@ -209,63 +211,44 @@ export async function buildContext(roomId: string, opts: BuildContextOptions = {
     } catch { /* expression error = not enabled */ }
   }
 
-  for (const d of deferredAgents) {
-    try {
-      if (evaluate(d.enabled_expr, ctx)) {
-        agents[d.id] = d.data;
-      }
-    } catch {}
-  }
+  // v8: Resolve views from _views scope (already in stateRows)
+  // Fallback removed — v8 backfill ensures all rooms have _views scope data.
+  const viewEntries = stateRows.filter(r => r.scope === "_views" && isTimerLive(r));
 
-  for (const d of deferredActions) {
-    try {
-      if (evaluate(d.enabled_expr, ctx)) {
-        actionsCtx[d.id] = { enabled: true };
-      }
-    } catch {}
-  }
-
-  // Resolve views — each view's expression runs with its registrar's scope authority
-  const viewResult = await sqlite.execute({
-    sql: `SELECT id, scope, expr, enabled_expr, timer_effect, timer_expires_at, timer_ticks_left FROM views WHERE room_id = ?`,
-    args: [roomId],
-  });
-  const viewRows = rows2objects(viewResult) as any[];
-
-  for (const v of viewRows) {
-    if (!isTimerLive(v)) continue;
+  for (const row of viewEntries) {
+    const val = parseValue(row.value);
+    if (!val.expr) continue;
 
     // Check enabled
-    if (v.enabled_expr) {
-      try {
-        if (!evaluate(v.enabled_expr, ctx)) continue;
-      } catch { continue; }
+    if (val.enabled) {
+      try { if (!evaluate(val.enabled, ctx)) continue; } catch { continue; }
     }
 
     // Build view-specific context with registrar's scope access
-    const viewCtx = await buildViewContext(roomId, v.scope, ctx);
+    const viewCtx = await buildViewContext(roomId, val.scope ?? "_shared", ctx);
 
     try {
-      const result = evaluate(v.expr, viewCtx);
-      ctx.views[v.id] = typeof result === "bigint" ? Number(result) : result;
+      const result = evaluate(val.expr, viewCtx);
+      ctx.views[row.key] = typeof result === "bigint" ? Number(result) : result;
     } catch (e: any) {
-      ctx.views[v.id] = { _error: e.message };
+      ctx.views[row.key] = { _error: e.message };
     }
   }
 
   // Evaluate action availability now that views are resolved
-  for (const a of actionRows) {
-    if (!isTimerLive(a)) continue;
-    if (!actionsCtx[a.id]) continue;
-    if (a.if_expr) {
+  for (const [id, actionEntry] of Object.entries(actionsCtx)) {
+    const ifExpr = actionEntry.if_expr;
+    if (ifExpr) {
       try {
-        actionsCtx[a.id].available = !!evaluate(a.if_expr, ctx);
+        actionsCtx[id].available = !!evaluate(ifExpr, ctx);
       } catch {
-        actionsCtx[a.id].available = false;
+        actionsCtx[id].available = false;
       }
     } else {
-      actionsCtx[a.id].available = true;
+      actionsCtx[id].available = true;
     }
+    // Clean up internal field
+    delete actionsCtx[id].if_expr;
   }
 
   return ctx;

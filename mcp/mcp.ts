@@ -1,33 +1,14 @@
 /**
  * mcp.ts — sync-mcp HTTP router + MCP protocol handler
  *
- * Routes:
- *   POST /mcp                                  — MCP JSON-RPC (requires OAuth)
- *   GET  /mcp                                  — Server info
- *   DELETE /mcp                                — Session termination (no-op)
- *   GET  /.well-known/oauth-protected-resource — PRM (RFC 9728)
- *   GET  /.well-known/oauth-authorization-server — AS metadata (RFC 8414)
- *   POST /oauth/register                       — Dynamic Client Registration
- *   GET  /oauth/authorize                      — Authorization + WebAuthn page
- *   POST /oauth/consent                        — Consent → auth code
- *   POST /oauth/token                          — Token exchange
- *   POST /webauthn/register/options             — WebAuthn registration options
- *   POST /webauthn/register/verify              — WebAuthn registration verify
- *   POST /webauthn/authenticate/options         — WebAuthn auth options
- *   POST /webauthn/authenticate/verify          — WebAuthn auth verify
- *   GET/POST/DELETE /vault                      — Token vault API
- *   GET  /manage                                — Management UI
- *   GET/POST/DELETE /manage/api/*               — Management API (session-auth)
- *   GET  /recover                               — Recovery page (passkey re-registration)
- *   POST /recover/validate                      — Validate recovery token
- *   POST /recover/register/options              — WebAuthn reg options (recovery-scoped)
- *   POST /recover/register/verify               — WebAuthn reg verify + consume token
+ * v7 Phase 1: extractSession also checks unified tokens table for tok_ tokens.
  */
 
 import {
   cleanupExpired, ensureSchema, validateAccessToken,
   getUserSession, createUserSession, getUserRoom, getEmbodiment,
-  vaultGetForRoom, parseScope, checkRoomInScope,
+  parseScope, checkRoomInScope,
+  validateTokenByHash,
   type ParsedScope,
 } from "./db.ts";
 import * as db from "./db.ts";
@@ -48,8 +29,6 @@ import {
   handleRegisterOptions,
   handleRegisterVerify,
   handleToken,
-  handleVault,
-  resolveAdminToken,
   resolveToken,
 } from "./auth.tsx";
 import {
@@ -62,7 +41,7 @@ import { type ToolContext, TOOLS } from "./tools.ts";
 // ─── Configuration ───────────────────────────────────────────────
 
 const SERVER_NAME = "sync-mcp-server";
-const SERVER_VERSION = "3.0.0";
+const SERVER_VERSION = "3.1.0";
 const PROTOCOL_VERSION = "2025-03-26";
 
 // ─── Schema init (runs once per cold start) ──────────────────────
@@ -72,10 +51,8 @@ async function initSchema() {
   if (!schemaReady) {
     await ensureSchema();
     schemaReady = true;
-    // Background cleanup
     cleanupExpired().catch(() => {});
-    // One-time vault → user_rooms migration
-    db.migrateVaultToUserRooms().catch(() => {});
+    db.cleanupDeviceCodes().catch(() => {});
   }
 }
 
@@ -131,7 +108,6 @@ async function handleRpc(
 ): Promise<JsonRpcResponse> {
   const { method, id, params } = req;
 
-  // ── Lifecycle ──
   if (method === "initialize") {
     return rpcResult(id, {
       protocolVersion: PROTOCOL_VERSION,
@@ -144,7 +120,6 @@ async function handleRpc(
     return rpcResult(id, {});
   }
 
-  // ── Tools ──
   if (method === "tools/list") {
     return rpcResult(id, { tools: toolsToSchema() });
   }
@@ -182,7 +157,7 @@ async function handleRpc(
   return rpcError(id, -32601, `Method not found: ${method}`);
 }
 
-// ─── Session extraction (replaces extractUserId) ─────────────────
+// ─── Session extraction ──────────────────────────────────────────
 
 interface SessionInfo {
   userId: string;
@@ -196,19 +171,31 @@ async function extractSession(req: Request): Promise<SessionInfo | null> {
   if (!authHeader?.startsWith("Bearer ")) return null;
 
   const token = authHeader.substring(7);
-  // Skip sync tokens (room_xxx, as_xxx, view_xxx) — those are per-call
+  // Skip sync tokens (room_xxx, as_xxx, view_xxx) — those are per-call legacy
   if (
     token.startsWith("room_") || token.startsWith("as_") ||
     token.startsWith("view_")
   ) return null;
 
+  // ── v7: Check unified tokens table for tok_ tokens ──
+  if (token.startsWith("tok_")) {
+    const tokenHash = await db.sha256(token);
+    const tok = await validateTokenByHash(tokenHash);
+    if (!tok) return null;
+    return {
+      userId: tok.mintedBy,
+      clientId: tok.clientId ?? "unified",
+      tokenHash,
+      scope: parseScope(tok.scope),
+    };
+  }
+
+  // ── Existing path: smcp_at_ tokens via smcp_access_tokens table ──
   const valid = await validateAccessToken(token);
   if (!valid) return null;
 
-  // Compute token hash for session lookup
   const tokenHash = await db.sha256(token);
 
-  // Look up or lazily create user session row
   let session = await getUserSession(tokenHash);
   if (!session) {
     try {
@@ -220,9 +207,8 @@ async function extractSession(req: Request): Promise<SessionInfo | null> {
         expiresAt: valid.expiresAt,
       });
       session = await getUserSession(tokenHash);
-    } catch (_) { /* race condition — another call created it */ }
+    } catch (_) { /* race condition */ }
     if (!session) {
-      // Fallback: return minimal info without session row
       return {
         userId: valid.userId,
         clientId: valid.clientId,
@@ -250,7 +236,7 @@ function unauthorizedResponse(req: Request): Response {
     JSON.stringify({
       error: "unauthorized",
       error_description:
-        "OAuth Bearer token required. Complete the OAuth flow to authenticate.",
+        "OAuth Bearer token required. Complete the OAuth flow or use device auth to authenticate.",
     }),
     {
       status: 401,
@@ -287,88 +273,51 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
-  // CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: CORS_HEADERS });
   }
 
-  // ── Well-Known endpoints (unauthenticated — required for discovery) ──
-  if (
-    req.method === "GET" && path === "/.well-known/oauth-protected-resource"
-  ) {
+  // ── Well-Known ──
+  if (req.method === "GET" && path === "/.well-known/oauth-protected-resource") {
     return handlePRM(req);
   }
-  if (
-    req.method === "GET" && path === "/.well-known/oauth-authorization-server"
-  ) {
+  if (req.method === "GET" && path === "/.well-known/oauth-authorization-server") {
     return handleASMetadata(req);
   }
 
-  // ── OAuth endpoints (unauthenticated — part of the auth flow itself) ──
-  if (req.method === "POST" && path === "/oauth/register") {
-    return handleDCR(req);
-  }
-  if (req.method === "GET" && path === "/oauth/authorize") {
-    return handleAuthorize(req);
-  }
-  if (req.method === "POST" && path === "/oauth/consent") {
-    return handleConsent(req);
-  }
-  if (req.method === "POST" && path === "/oauth/token") {
-    return handleToken(req);
-  }
+  // ── OAuth ──
+  if (req.method === "POST" && path === "/oauth/register") return handleDCR(req);
+  if (req.method === "GET" && path === "/oauth/authorize") return handleAuthorize(req);
+  if (req.method === "POST" && path === "/oauth/consent") return handleConsent(req);
+  if (req.method === "POST" && path === "/oauth/token") return handleToken(req);
 
-  // ── WebAuthn endpoints (unauthenticated — part of the auth flow) ──
-  if (req.method === "POST" && path === "/webauthn/register/options") {
-    return handleRegisterOptions(req);
-  }
-  if (req.method === "POST" && path === "/webauthn/register/verify") {
-    return handleRegisterVerify(req);
-  }
-  if (req.method === "POST" && path === "/webauthn/authenticate/options") {
-    return handleAuthOptions(req);
-  }
-  if (req.method === "POST" && path === "/webauthn/authenticate/verify") {
-    return handleAuthVerify(req);
-  }
+  // ── WebAuthn ──
+  if (req.method === "POST" && path === "/webauthn/register/options") return handleRegisterOptions(req);
+  if (req.method === "POST" && path === "/webauthn/register/verify") return handleRegisterVerify(req);
+  if (req.method === "POST" && path === "/webauthn/authenticate/options") return handleAuthOptions(req);
+  if (req.method === "POST" && path === "/webauthn/authenticate/verify") return handleAuthVerify(req);
 
-  // ── Management UI (WebAuthn session-authenticated) ──
-  if (req.method === "GET" && path === "/manage") {
-    return handleManagePage(req);
-  }
-  if (path.startsWith("/manage/api")) {
-    return handleManageApi(req);
-  }
+  // ── Management UI ──
+  if (req.method === "GET" && path === "/manage") return handleManagePage(req);
+  if (path.startsWith("/manage/api")) return handleManageApi(req);
 
-  // ── Recovery (unauthenticated — uses recovery token) ──
-  if (req.method === "GET" && path === "/recover") {
-    return handleRecoverPage(req);
-  }
-  if (req.method === "POST" && path === "/recover/validate") {
-    return handleRecoverValidate(req);
-  }
-  if (req.method === "POST" && path === "/recover/register/options") {
-    return handleRecoverRegisterOptions(req);
-  }
-  if (req.method === "POST" && path === "/recover/register/verify") {
-    return handleRecoverRegisterVerify(req);
-  }
+  // ── Recovery ──
+  if (req.method === "GET" && path === "/recover") return handleRecoverPage(req);
+  if (req.method === "POST" && path === "/recover/validate") return handleRecoverValidate(req);
+  if (req.method === "POST" && path === "/recover/register/options") return handleRecoverRegisterOptions(req);
+  if (req.method === "POST" && path === "/recover/register/verify") return handleRecoverRegisterVerify(req);
 
-  // ── Vault API (requires OAuth) ──
+  // ── Vault API (REMOVED — legacy, kept as 410 for old clients) ──
   if (path.startsWith("/vault")) {
-    const session = await extractSession(req);
-    if (!session) {
-      return unauthorizedResponse(req);
-    }
-    return handleVault(req, session.userId);
+    return corsJson({ error: "vault_deprecated", message: "Vault has been replaced by unified tokens. Use /tokens endpoints." }, 410);
   }
 
-  // ── MCP: DELETE (session termination, no-op for stateless) ──
+  // ── MCP: DELETE ──
   if (req.method === "DELETE" && (path === "/mcp" || path === "/")) {
     return new Response(null, { status: 200, headers: CORS_HEADERS });
   }
 
-  // ── MCP: GET (server info — unauthenticated for discoverability) ──
+  // ── MCP: GET (server info) ──
   if (req.method === "GET" && (path === "/" || path === "/mcp")) {
     return corsJson({
       name: SERVER_NAME,
@@ -376,94 +325,91 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
       protocol: "MCP",
       protocolVersion: PROTOCOL_VERSION,
       transport: "streamable-http",
-      auth: "OAuth 2.1 + WebAuthn passkeys",
+      auth: "OAuth 2.1 + WebAuthn passkeys + Device Auth",
       tools: TOOLS.map((t) => t.name),
       description:
         "MCP server for sync — multi-agent coordination platform (https://sync.parc.land)",
       endpoints: {
-        mcp: "POST /mcp (JSON-RPC 2.0, requires OAuth)",
+        mcp: "POST /mcp (JSON-RPC 2.0, requires OAuth or device auth token)",
+        device_auth: "POST /auth/device (initiate), GET /auth/device (approve), POST /auth/device/token (poll)",
+        tokens: "POST /tokens (mint), GET /tokens (list), DELETE /tokens/:id (revoke)",
         oauth_prm: "GET /.well-known/oauth-protected-resource",
         oauth_metadata: "GET /.well-known/oauth-authorization-server",
         oauth_register: "POST /oauth/register",
         oauth_authorize: "GET /oauth/authorize",
         oauth_token: "POST /oauth/token",
-        vault: "GET/POST/DELETE /vault",
       },
     });
   }
 
-  // ── MCP: POST (JSON-RPC — requires OAuth) ──
+  // ── MCP: POST (JSON-RPC — requires OAuth or unified token) ──
   if (req.method === "POST" && (path === "/mcp" || path === "/")) {
-    // Require OAuth Bearer token
     const session = await extractSession(req);
-    if (!session) {
-      return unauthorizedResponse(req);
-    }
+    if (!session) return unauthorizedResponse(req);
 
-    // Build tool context with session-aware resolution
     const ctx: ToolContext = {
       userId: session.userId,
       clientId: session.clientId,
       sessionHash: session.tokenHash,
       scope: session.scope,
 
-      // New: resolve auth for a room accounting for embodiment
       async resolveForRoom(roomId: string) {
-        // 1. Check scope allows this room
         const scopeCheck = checkRoomInScope(session.scope, roomId, "observe");
-        if (!scopeCheck.allowed) return null;
-
-        // 2. Check user_rooms for access level
-        const userRoom = await getUserRoom(session.userId, roomId);
-        if (!userRoom) {
-          // Fallback: check vault for legacy tokens
-          const vaultEntries = await vaultGetForRoom(session.userId, roomId);
-          if (vaultEntries.length === 0) return null;
-          const best = vaultEntries.find(e => e.tokenType === "agent")
-                    ?? vaultEntries.find(e => e.tokenType === "room")
-                    ?? vaultEntries[0];
-          const auth = await resolveAuthFromToken(best.token, roomId);
-          if (auth instanceof Response) return null;
-          return { auth, agentId: auth.agentId };
+        if (!scopeCheck.allowed) {
+          // Surface elevation URL for scope_denied — agent can present to user
+          const tokenResult = await db.validateTokenByHash(session.tokenHash);
+          if (tokenResult) {
+            const elevateUrl = `https://sync.parc.land/auth/elevate?token_id=${encodeURIComponent(tokenResult.id)}&room=${encodeURIComponent(roomId)}`;
+            throw new Error(`scope_denied: Token scope does not include room "${roomId}". To request access, ask the user to open: ${elevateUrl}`);
+          }
+          return null;
         }
 
-        // 3. Check for active embodiment in this room
-        const embodiedAgentId = await getEmbodiment(
-          session.tokenHash, roomId,
-        );
+        // v7: user_rooms is the source of truth. No vault fallback.
+        const userRoom = await getUserRoom(session.userId, roomId);
+        if (!userRoom) return null;
+
+        // Check for active embodiment in this room
+        const embodiedAgentId = await getEmbodiment(session.tokenHash, roomId);
         if (embodiedAgentId) {
           const agentAuth = await resolveAgentAuth(roomId, embodiedAgentId);
           if (agentAuth) return { auth: agentAuth, agentId: embodiedAgentId };
-          // Agent no longer exists — clean up stale embodiment
           await db.removeEmbodiment(session.tokenHash, roomId);
         }
 
-        // 4. Not embodied — return view-level access
+        // Not embodied — return access level based on user_rooms role
+        const isOwner = userRoom.access === "owner";
         return {
           auth: {
             authenticated: true,
-            kind: "view" as const,
+            kind: (isOwner ? "room" : "view") as "room" | "view",
             agentId: null,
             roomId,
-            grants: [],
+            grants: isOwner ? ["*"] : [],
+            userId: session.userId,
           },
           agentId: null,
         };
       },
 
-      // Legacy resolver (backward compat)
+      // Legacy resolver — kept for backward compat with old tool paths
+      // that pass explicit token params. Will be removed in Phase 5.
       resolveToken: (room?: string, token?: string) =>
         resolveToken(session.userId, room, token),
 
-      // Admin auth for privilege escalation
+      // v7: Admin auth from user_rooms owner role, no vault lookup needed
       async resolveAdminAuth(roomId: string) {
         const userRoom = await getUserRoom(session.userId, roomId);
         if (!userRoom || userRoom.access !== "owner") return null;
-        const adminToken = await resolveAdminToken(session.userId, roomId);
-        if (!adminToken) return null;
-        const auth = await resolveAuthFromToken(adminToken, roomId);
-        if (auth instanceof Response) return null;
-        return auth;
+        // Construct admin AuthResult directly from ownership
+        return {
+          authenticated: true,
+          kind: "room" as const,
+          agentId: null,
+          roomId,
+          grants: ["*"],
+          userId: session.userId,
+        };
       },
     };
 
@@ -480,7 +426,6 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
       );
     }
 
-    // Handle batch
     if (Array.isArray(body)) {
       const responses = await Promise.all(
         (body as JsonRpcRequest[]).map((r) => handleRpc(r, ctx)),
@@ -490,7 +435,6 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
       });
     }
 
-    // Single request
     const response = await handleRpc(body as JsonRpcRequest, ctx);
     return new Response(JSON.stringify(response), {
       headers: { ...CORS_HEADERS, "Content-Type": "application/json" },

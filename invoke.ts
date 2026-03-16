@@ -14,7 +14,7 @@ import { buildContext, evalCelWithParams, buildViewContext, type BuildContextOpt
 import { isTimerLive, getTimerStatus, parseTimer, tickLogicalTimers, validateTimer } from "./timers.ts";
 import { touchAgent, type AuthResult } from "./auth.ts";
 import { appendAuditEntry, appendStructuralEvent } from "./audit.ts";
-import { registerAction, deleteAction, formatAction, computeContestedTargets } from "./actions.ts";
+import { registerAction, deleteAction, computeContestedTargets } from "./actions.ts";
 import { registerView, deleteView } from "./views.ts";
 import { HELP_SYSTEM } from "./help-content.ts";
 
@@ -86,9 +86,12 @@ export async function invokeAction(roomId: string, actionId: string, body: any, 
   const agent = body.agent ?? auth.agentId;
   touchAgent(roomId, agent);
 
-  const actionResult = await sqlite.execute({ sql: `SELECT * FROM actions WHERE id = ? AND room_id = ?`, args: [actionId, roomId] });
-  const action = rows2objects(actionResult)[0];
-  if (!action) {
+  // v8: Read action definition from _actions scope
+  const scopeResult = await sqlite.execute({
+    sql: `SELECT value FROM state WHERE room_id = ? AND scope = '_actions' AND key = ?`,
+    args: [roomId, actionId],
+  });
+  if (scopeResult.rows.length === 0) {
     // Fall through to overridable built-in if no custom action registered
     if (OVERRIDABLE_BUILTINS.has(actionId) && BUILTIN_ACTIONS[actionId]) {
       const response = await invokeBuiltinAction(roomId, actionId, body, auth);
@@ -97,6 +100,28 @@ export async function invokeAction(roomId: string, actionId: string, body: any, 
     }
     return json({ error: "action not found" }, 404);
   }
+
+  let def: any;
+  try { def = JSON.parse(scopeResult.rows[0][0] as string); } catch {
+    return json({ error: "action_corrupt", action: actionId }, 500);
+  }
+
+  // Normalize v8 def to match the field names invoke.ts expects
+  const action: any = {
+    id: actionId,
+    scope: def.scope ?? "_shared",
+    enabled_expr: def.enabled ?? null,
+    if_expr: def.if ?? null,
+    result_expr: def.result ?? null,
+    params_json: def.params ? JSON.stringify(def.params) : null,
+    writes_json: def.writes ? JSON.stringify(def.writes) : "[]",
+    on_invoke_timer_json: def.on_invoke?.timer ? JSON.stringify(def.on_invoke.timer) : null,
+    // Timer state from _timer field in scope value
+    timer_effect: def._timer?.timer_effect ?? null,
+    timer_expires_at: def._timer?.timer_expires_at ?? null,
+    timer_ticks_left: def._timer?.timer_ticks_left ?? null,
+  };
+
   if (!isTimerLive(action)) {
     // Distinguish cooldown (dormant, will re-enable) from truly expired
     if (action.timer_effect === "enable" && getTimerStatus(action) === "active") {
@@ -364,18 +389,32 @@ export async function invokeAction(roomId: string, actionId: string, body: any, 
     await tickLogicalTimers(roomId, w.scope, w.key);
   }
 
-  // Apply on_invoke cooldown timer
+  // Apply on_invoke cooldown timer — update _timer field in _actions scope
   if (action.on_invoke_timer_json) {
     try {
       const invokeTimer = JSON.parse(action.on_invoke_timer_json);
       const cols = parseTimer(invokeTimer);
-      await sqlite.execute({
-        sql: `UPDATE actions SET timer_json = ?, timer_expires_at = ?, timer_ticks_left = ?,
-              timer_tick_on = ?, timer_effect = ?, timer_started_at = ?
-              WHERE id = ? AND room_id = ?`,
-        args: [cols.timer_json, cols.timer_expires_at, cols.timer_ticks_left,
-               cols.timer_tick_on, cols.timer_effect, cols.timer_started_at, actionId, roomId],
+      // Re-read current def, update _timer, write back
+      const currentResult = await sqlite.execute({
+        sql: `SELECT value FROM state WHERE room_id = ? AND scope = '_actions' AND key = ?`,
+        args: [roomId, actionId],
       });
+      if (currentResult.rows.length > 0) {
+        const currentDef = JSON.parse(currentResult.rows[0][0] as string);
+        currentDef._timer = {
+          timer_json: cols.timer_json,
+          timer_expires_at: cols.timer_expires_at,
+          timer_ticks_left: cols.timer_ticks_left,
+          timer_tick_on: cols.timer_tick_on,
+          timer_effect: cols.timer_effect,
+          timer_started_at: cols.timer_started_at,
+        };
+        await sqlite.execute({
+          sql: `UPDATE state SET value = ?, revision = revision + 1, updated_at = datetime('now')
+                WHERE room_id = ? AND scope = '_actions' AND key = ?`,
+          args: [JSON.stringify(currentDef), roomId, actionId],
+        });
+      }
     } catch {}
   }
 

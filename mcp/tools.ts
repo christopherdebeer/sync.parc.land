@@ -433,7 +433,8 @@ Returns: { id, token, view_token, created_at }`,
       if (params.meta) body.meta = params.meta;
       const result = await unwrap(await createRoom(body)) as Record<string, unknown>;
 
-      // Register user-room relationship + widen session scope
+      // v7: rooms.ts handles user_rooms linkage when auth has userId.
+      // No vault auto-store needed.
       if (ctx.userId && result.id) {
         await db.upsertUserRoom(
           ctx.userId, result.id as string, "owner",
@@ -442,34 +443,10 @@ Returns: { id, token, view_token, created_at }`,
         );
         // Widen session scope
         if (ctx.sessionHash && ctx.scope) {
-          const newScope: ParsedScope = { rooms: new Map(ctx.scope.rooms), createRooms: ctx.scope.createRooms };
+          const newScope: ParsedScope = { rooms: new Map(ctx.scope.rooms), createRooms: ctx.scope.createRooms, wildcardRooms: ctx.scope.wildcardRooms };
           newScope.rooms.set(result.id as string, { level: "full" });
           await db.updateSessionScope(ctx.sessionHash, serializeScope(newScope));
         }
-      }
-
-      // Auto-vault for backward compat
-      if (ctx.userId && result.token && result.id) {
-        try {
-          await db.vaultStore({
-            userId: ctx.userId,
-            roomId: result.id as string,
-            token: result.token as string,
-            tokenType: "room",
-            label: (params.label as string) ?? `Room ${result.id}`,
-            isDefault: params.set_default as boolean ?? false,
-          });
-          if (result.view_token) {
-            await db.vaultStore({
-              userId: ctx.userId,
-              roomId: result.id as string,
-              token: result.view_token as string,
-              tokenType: "view",
-              label: `View: ${result.id}`,
-            });
-          }
-          result._vaulted = true;
-        } catch (_) {}
       }
       return result;
     },
@@ -494,16 +471,17 @@ Returns: Array of room objects.`,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async handler(params, ctx) {
       await ensureMigrated();
-      let token = params.token as string | undefined;
-      if (!token && ctx.userId) {
-        const entries = await db.vaultList(ctx.userId);
-        if (entries.length > 0) token = entries[0].token;
-      }
-      if (!token) throw new Error("No token available. Provide 'token' parameter or authenticate via OAuth.");
-      const fakeReq = new Request("http://internal/rooms", {
-        headers: { Authorization: `Bearer ${token}` },
+      if (!ctx.userId) throw new Error("Authentication required. Use sync_lobby for a richer view.");
+      // v7: Use user_rooms as source of truth
+      const userRooms = await db.listUserRooms(ctx.userId);
+      if (userRooms.length === 0) return [];
+      const roomIds = userRooms.map(ur => ur.roomId);
+      const placeholders = roomIds.map(() => "?").join(",");
+      const result = await sqlite.execute({
+        sql: `SELECT id, created_at, meta FROM rooms WHERE id IN (${placeholders}) ORDER BY created_at DESC`,
+        args: roomIds,
       });
-      return unwrap(await listRooms(fakeReq));
+      return rows2objects(result);
     },
   },
 
@@ -546,18 +524,7 @@ Returns: Agent object with { id, token, room_id, ... }`,
         return joinRoom(resolved.room, body, req);
       }) as Record<string, unknown>;
 
-      if (ctx.userId && result.token) {
-        try {
-          await db.vaultStore({
-            userId: ctx.userId,
-            roomId: resolved.room,
-            token: result.token as string,
-            tokenType: "agent",
-            label: `Agent: ${result.id ?? "unknown"}`,
-          });
-          result._vaulted = true;
-        } catch (_) {}
-      }
+      // v7: no vault auto-store. Agent tokens are returned to caller.
       return result;
     },
   },
@@ -1002,86 +969,7 @@ Args: room (required), id (required).`,
   },
 
   // ═══════════════════════════════════════════════════════════════
-  // Vault management (auth-only, backward compat)
+  // Vault management — REMOVED in v7 (unified tokens replace vault)
+  // Legacy vault tools have been removed. Use /tokens endpoints instead.
   // ═══════════════════════════════════════════════════════════════
-
-  {
-    name: "sync_vault_list",
-    title: "List Vault",
-    description: `List all sync tokens stored in your vault. Requires OAuth.
-Prefer sync_lobby for a richer view of your rooms.
-
-Returns: Array of vault entries with room_id, token_type, label, is_default.`,
-    inputSchema: { type: "object", properties: {} },
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async handler(_params, ctx) {
-      if (!ctx.userId) throw new Error("OAuth authentication required for vault access.");
-      const entries = await db.vaultList(ctx.userId);
-      return entries.map((e) => ({
-        id: e.id,
-        room_id: e.roomId,
-        token_type: e.tokenType,
-        label: e.label,
-        is_default: e.isDefault,
-        token_preview: e.token.substring(0, 12) + "...",
-      }));
-    },
-  },
-
-  {
-    name: "sync_vault_store",
-    title: "Store Token in Vault",
-    description: `Add a sync token to your vault. Requires OAuth.
-
-Args: room_id (required), token (required), token_type (required), label, set_default.
-
-Returns: { id, room_id, token_type }`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        room_id: { type: "string" },
-        token: { type: "string" },
-        token_type: { type: "string", enum: ["room", "agent", "view"] },
-        label: { type: "string" },
-        set_default: { type: "boolean" },
-      },
-      required: ["room_id", "token", "token_type"],
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    async handler(params, ctx) {
-      if (!ctx.userId) throw new Error("OAuth authentication required for vault access.");
-      const id = await db.vaultStore({
-        userId: ctx.userId,
-        roomId: params.room_id as string,
-        token: params.token as string,
-        tokenType: params.token_type as string,
-        label: params.label as string | undefined,
-        isDefault: params.set_default as boolean | undefined,
-      });
-      return { id, room_id: params.room_id, token_type: params.token_type };
-    },
-  },
-
-  {
-    name: "sync_vault_remove",
-    title: "Remove from Vault",
-    description: `Remove a token from your vault. Requires OAuth.
-
-Args: id (required): Vault entry ID (from sync_vault_list).
-
-Returns: { deleted: true }`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Vault entry ID" },
-      },
-      required: ["id"],
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    async handler(params, ctx) {
-      if (!ctx.userId) throw new Error("OAuth authentication required for vault access.");
-      await db.vaultDelete(ctx.userId, params.id as string);
-      return { deleted: true, id: params.id };
-    },
-  },
 ];

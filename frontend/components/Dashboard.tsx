@@ -8,7 +8,14 @@ import {
 } from "https://esm.sh/react@18.2.0";
 import { styled } from "../styled.ts";
 import { Nav } from "./Nav.tsx";
-import type { Agent, DashboardConfig, PollData, Surface, TokenKind, View } from "../types.ts";
+import type {
+  PollDataV8, DashboardConfig, Surface, TokenKind,
+  ActionDef, ViewDef, AgentDef, StateEntry, AuditEntry,
+} from "../types.ts";
+import {
+  actionsFromState, viewsFromState, agentsFromState,
+  messagesFromState, sharedState, scopeEntries, allScopes,
+} from "../types.ts";
 import { JsonView } from "./JsonView.tsx";
 import { AgentsPanel } from "./panels/Agents.tsx";
 import { StatePanel } from "./panels/State.tsx";
@@ -45,6 +52,7 @@ function safeRemoveItem(storage: Storage, key: string): void {
 function inferTokenKind(tok: string): TokenKind {
   if (tok.startsWith("room_")) return "room";
   if (tok.startsWith("view_")) return "view";
+  if (tok.startsWith("tok_")) return "room"; // unified tokens get full dashboard access
   return "agent";
 }
 
@@ -201,13 +209,13 @@ const DebugSection = styled.div<{ $open: boolean }>`
 type PollStatus = "connecting" | "live" | "error";
 type TabId = "agents" | "state" | "messages" | "actions" | "views" | "audit" | "cel";
 
-const ALL_TABS: { id: TabId; label: string; countKey?: keyof PollData }[] = [
-  { id: "agents", label: "Agents", countKey: "agents" },
-  { id: "state", label: "State", countKey: "state" },
-  { id: "messages", label: "Messages", countKey: "messages" },
-  { id: "actions", label: "Actions", countKey: "actions" },
-  { id: "views", label: "Views", countKey: "views" },
-  { id: "audit", label: "Audit", countKey: "audit" },
+const ALL_TABS: { id: TabId; label: string }[] = [
+  { id: "agents", label: "Agents" },
+  { id: "state", label: "State" },
+  { id: "messages", label: "Messages" },
+  { id: "actions", label: "Actions" },
+  { id: "views", label: "Views" },
+  { id: "audit", label: "Audit" },
   { id: "cel", label: "CEL" },
 ];
 
@@ -215,7 +223,7 @@ interface DashboardProps { roomId: string; }
 
 // ── Dashboard config helpers ─────────────────────────────────────────────────
 
-function extractDashboardConfig(state: any[]): DashboardConfig | null {
+function extractDashboardConfig(state: StateEntry[]): DashboardConfig | null {
   const row = state.find(s => s.scope === "_shared" && s.key === "_dashboard");
   if (!row) return null;
   const v = typeof row.value === "string" ? (() => { try { return JSON.parse(row.value); } catch { return null; } })() : row.value;
@@ -223,29 +231,27 @@ function extractDashboardConfig(state: any[]): DashboardConfig | null {
   return v as DashboardConfig;
 }
 
-function renderHintToSurface(view: View): Surface {
-  const hint = view.render!;
-  const id = `auto-${view.id}`;
-  const label = hint.label || view.description || view.id;
+/** v8: Generate auto-surface from a view definition with render hint */
+function viewDefToSurface(viewId: string, def: ViewDef): Surface {
+  const hint = def.render!;
+  const id = `auto-${viewId}`;
+  const label = hint.label || def.description || viewId;
   switch (hint.type) {
-    case "metric": return { id, type: "metric", view: view.id, label };
-    case "markdown": return { id, type: "markdown", view: view.id, label };
-    case "array-table": return { id, type: "array-table", view: view.id, label, columns: hint.columns, max_rows: hint.max_rows };
-    case "view-table": return { id, type: "view-table", views: [view.id], label };
-    default: return { id, type: "metric", view: view.id, label };
+    case "metric": return { id, type: "metric", view: viewId, label };
+    case "markdown": return { id, type: "markdown", view: viewId, label };
+    case "array-table": return { id, type: "array-table", view: viewId, label, columns: hint.columns, max_rows: hint.max_rows };
+    case "view-table": return { id, type: "view-table", views: [viewId], label };
+    default: return { id, type: "metric", view: viewId, label };
   }
 }
 
-function makeSimpleCelEvaluator(data: PollData): (expr: string) => boolean {
+/** v8: Build a simple client-side CEL evaluator from state entries */
+function makeSimpleCelEvaluatorV8(data: PollDataV8): (expr: string) => boolean {
   const stateMap: Record<string, Record<string, any>> = {};
   for (const s of data.state) {
     if (!stateMap[s.scope]) stateMap[s.scope] = {};
-    let val = s.value;
-    if (typeof val === "string") { try { val = JSON.parse(val); } catch {} }
-    stateMap[s.scope][s.key] = val;
+    stateMap[s.scope][s.key] = s.value;
   }
-  const viewMap: Record<string, any> = {};
-  for (const v of data.views) { viewMap[v.id] = v.value; }
 
   function evalAtom(clause: string): boolean {
     const c = clause.trim();
@@ -261,8 +267,8 @@ function makeSimpleCelEvaluator(data: PollData): (expr: string) => boolean {
       else if (expected === "false") expected = false;
       else if (expected === "null") expected = null;
       else if (!isNaN(Number(expected))) expected = Number(expected);
-      if (op === "==") { return (actual === undefined || actual === null) ? (expected === false || expected === null || expected === 0 || expected === "") : actual == expected; }
-      if (op === "!=") { return (actual === undefined || actual === null) ? !(expected === false || expected === null || expected === 0 || expected === "") : actual != expected; }
+      if (op === "==") return actual == expected;
+      if (op === "!=") return actual != expected;
       if (op === ">") return actual > expected;
       if (op === "<") return actual < expected;
       if (op === ">=") return actual >= expected;
@@ -271,7 +277,7 @@ function makeSimpleCelEvaluator(data: PollData): (expr: string) => boolean {
     const mv = c.match(/^views\["?([^"]+)"?\]\s*(==|!=)\s*(.+)$/);
     if (mv) {
       const [, id, op, rawVal] = mv;
-      const actual = viewMap[id];
+      const actual = data.resolved[id];
       let expected: any = rawVal.trim();
       if ((expected.startsWith('"') && expected.endsWith('"')) || (expected.startsWith("'") && expected.endsWith("'"))) expected = expected.slice(1, -1);
       if (op === "==") return actual == expected;
@@ -300,7 +306,7 @@ export function Dashboard({ roomId }: DashboardProps) {
   const [tokenInput, setTokenInput] = useState("");
   const [authError, setAuthError] = useState("");
   const [authStatus, setAuthStatus] = useState("");
-  const [data, setData] = useState<PollData | null>(null);
+  const [data, setData] = useState<PollDataV8 | null>(null);
   const [pollStatus, setPollStatus] = useState<PollStatus>("connecting");
   const [activeTab, setActiveTab] = useState<TabId>("agents");
   const [viewAs, setViewAs] = useState("");
@@ -320,26 +326,32 @@ export function Dashboard({ roomId }: DashboardProps) {
     "Authorization": `Bearer ${token}`,
   }), [token]);
 
-  const agentMap = useMemo<Record<string, Agent>>(() => {
-    const m: Record<string, Agent> = {};
-    for (const a of data?.agents || []) m[a.id] = a;
+  const agentMap = useMemo<Record<string, { name: string; role: string }>>(() => {
+    if (!data) return {};
+    const m: Record<string, { name: string; role: string }> = {};
+    for (const a of agentsFromState(data)) m[a.id] = { name: a.def.name, role: a.def.role };
     return m;
-  }, [data?.agents]);
+  }, [data]);
 
   const dashConfig = useMemo<DashboardConfig | null>(() => {
     if (!data) return null;
     return extractDashboardConfig(data.state);
-  }, [data?.state]);
+  }, [data]);
+
+  // v8: derive views from state for surface detection
+  const derivedViews = useMemo(() => data ? viewsFromState(data) : [], [data]);
 
   const hasSurfaces = useMemo(
-    () => Boolean(dashConfig?.surfaces?.length) || Boolean(data?.views?.some(v => v.render)),
-    [dashConfig, data?.views]
+    () => Boolean(dashConfig?.surfaces?.length) || Boolean(derivedViews.some(v => v.def.render)),
+    [dashConfig, derivedViews]
   );
   const activeSurfaces = useMemo<Surface[]>(() => {
     if (dashConfig?.surfaces?.length) return dashConfig.surfaces;
-    const vs = data?.views ?? [];
-    return vs.filter(v => v.render).sort((a, b) => (a.render?.order ?? 999) - (b.render?.order ?? 999)).map(v => renderHintToSurface(v));
-  }, [dashConfig, data?.views]);
+    return derivedViews
+      .filter(v => v.def.render)
+      .sort((a, b) => (a.def.render?.order ?? 999) - (b.def.render?.order ?? 999))
+      .map(v => viewDefToSurface(v.id, v.def));
+  }, [dashConfig, derivedViews]);
   const visibleTabs = useMemo(() => {
     if (!dashConfig?.tabs) return ALL_TABS;
     return ALL_TABS.filter(t => new Set(dashConfig.tabs).has(t.id));
@@ -354,13 +366,24 @@ export function Dashboard({ roomId }: DashboardProps) {
 
   const evalCel = useMemo(() => {
     if (!data) return () => true;
-    return makeSimpleCelEvaluator(data);
+    return makeSimpleCelEvaluatorV8(data);
   }, [data]);
 
+  // v8: Build SurfaceContext directly from v8 data — no legacy adapter
   const surfaceCtx = useMemo<SurfaceContext | null>(() => {
     if (!data || !token) return null;
-    return { data, agentMap, roomId, baseUrl: BASE_URL, authHeaders: () => ({ "Authorization": `Bearer ${token}` }), evalCel };
-  }, [data, agentMap, roomId, token, evalCel]);
+    return {
+      views: derivedViews.map(v => ({ id: v.id, value: v.value, description: v.def.description, render: v.def.render })),
+      actions: actionsFromState(data).map(a => ({ id: a.id, available: a.available, description: a.def.description, params: a.def.params, writes: a.def.writes, if: a.def.if })),
+      messages: messagesFromState(data).map(m => ({ sort_key: m.sort_key ?? 0, value: m.value, updated_at: m.updated_at })),
+      state: data.state.map(s => ({ scope: s.scope, key: s.key, value: s.value })),
+      agentMap,
+      roomId,
+      baseUrl: BASE_URL,
+      authHeaders: () => ({ "Authorization": `Bearer ${token}` }),
+      evalCel,
+    };
+  }, [data, derivedViews, agentMap, roomId, token, evalCel]);
 
   const doPoll = useCallback(async (tok: string) => {
     try {
@@ -369,7 +392,7 @@ export function Dashboard({ roomId }: DashboardProps) {
       });
       if (r.status === 401) return null;
       if (!r.ok) throw new Error(`${r.status}`);
-      return await r.json() as PollData;
+      return await r.json() as PollDataV8;
     } catch { return undefined; }
   }, [roomId]);
 
@@ -404,19 +427,20 @@ export function Dashboard({ roomId }: DashboardProps) {
     setToken(tok); setTokenKind(inferTokenKind(tok)); setData(d); setPollStatus("live"); startPolling(tok);
   }, [tokenInput, doPoll, roomId, startPolling]);
 
-  const tryVaultAuth = useCallback(async (sessionId: string): Promise<boolean> => {
+  const tryRoomTokenAuth = useCallback(async (sessionId: string): Promise<boolean> => {
     try {
-      const res = await fetch(`${BASE_URL}/manage/api/vault`, {
+      // v7: Mint a temporary tok_ token for this room via manage API
+      const res = await fetch(`${BASE_URL}/manage/api/room-token`, {
+        method: "POST",
         headers: { "X-Session-Id": sessionId, "Content-Type": "application/json" },
+        body: JSON.stringify({ room_id: roomId }),
       });
       if (res.status === 401) { safeRemoveItem(localStorage, "sync_session_id"); return false; }
+      if (res.status === 403) return false; // no access to this room
       if (!res.ok) return false;
       const data = await res.json();
-      const entries = (data.entries ?? []).filter((e: any) => e.room_id === roomId);
-      if (entries.length === 0) return false;
-      const best = entries.find((e: any) => e.token_type === "agent") ?? entries.find((e: any) => e.token_type === "room") ?? entries[0];
-      if (!best?.token) return false;
-      return await authenticateWith(best.token);
+      if (!data.token) return false;
+      return await authenticateWith(data.token);
     } catch { return false; }
   }, [roomId, authenticateWith]);
 
@@ -434,12 +458,12 @@ export function Dashboard({ roomId }: DashboardProps) {
       const verData = await verRes.json();
       if (!verRes.ok || !verData.verified) { setAuthError(verData.error || "Authentication failed"); setAuthStatus(""); return; }
       safeSetItem(localStorage, "sync_session_id", verData.sessionId);
-      setAuthStatus("Resolving vault…");
-      const ok = await tryVaultAuth(verData.sessionId);
-      if (!ok) setAuthError("Signed in but no tokens found in vault for this room.");
+      setAuthStatus("Checking access…");
+      const ok = await tryRoomTokenAuth(verData.sessionId);
+      if (!ok) setAuthError("Signed in but you don't have access to this room.");
       setAuthStatus("");
     } catch (err: any) { setAuthError(err.message || "Passkey authentication failed"); setAuthStatus(""); }
-  }, [tryVaultAuth]);
+  }, [tryRoomTokenAuth]);
 
   // ── Mount: sequential auth chain with debug logging ───────────────────────
 
@@ -495,16 +519,16 @@ export function Dashboard({ roomId }: DashboardProps) {
           log("stored token invalid — cleared");
         }
 
-        // 3. Vault auto-resolution
+        // 3. User-rooms auto-resolution (v7 — replaces vault)
         if (!cancelled) {
           const sessionId = safeGetItem(localStorage, "sync_session_id");
           log("manage session: " + (sessionId ? sessionId.slice(0, 12) + "…" : "null"));
           if (sessionId) {
-            log("trying vault resolution…");
-            setAuthStatus("Checking vault…");
-            const ok = await tryVaultAuth(sessionId);
-            if (cancelled) { log("cancelled after vault"); return; }
-            log("vault result: " + (ok ? "authenticated ✓" : "no match"));
+            log("trying room-token resolution…");
+            setAuthStatus("Checking access…");
+            const ok = await tryRoomTokenAuth(sessionId);
+            if (cancelled) { log("cancelled after room-token"); return; }
+            log("room-token result: " + (ok ? "authenticated ✓" : "no access"));
             if (ok) { setAuthStatus(""); return; }
             setAuthStatus("");
           }
@@ -580,16 +604,97 @@ export function Dashboard({ roomId }: DashboardProps) {
 
   // ── Authenticated dashboard ───────────────────────────────────────────────
 
-  const agents = data?.agents || []; const state = data?.state || [];
-  const messages = data?.messages || []; const actions = data?.actions || [];
-  const views = data?.views || []; const audit = data?.audit || [];
-  const activeAgents = agents.filter(a => a.status === "active").length;
-  const waitingAgents = agents.filter(a => a.status === "waiting").length;
-  const scopeCount = new Set(state.map(s => s.scope)).size;
+  // v8-DIAG: minimal render to isolate the crash
+  if (data) {
+    return (
+      <div style={{ padding: "2rem", fontFamily: "monospace", fontSize: "13px", background: "#0d1117", color: "#c9d1d9", minHeight: "100vh" }}>
+        <div style={{ color: "#58a6ff", fontWeight: 600, marginBottom: "1rem" }}>v8 dashboard diagnostic — {roomId}</div>
+        <div>token: {String(tokenKind)} · poll: {String(pollStatus)}</div>
+        <div>state: {data.state?.length ?? "?"} · audit: {data.audit?.length ?? "?"}</div>
+        <div>views: {data.state?.filter((s: any) => s.scope === "_views").length} · agents: {data.state?.filter((s: any) => s.scope === "_agents").length}</div>
+        <div style={{ marginTop: "1rem", color: "#3fb950" }}>If you see this, hooks work. The crash is in the full render tree below.</div>
+        <div style={{ marginTop: "1rem" }}><span onClick={doLogout} style={{ color: "#f85149", cursor: "pointer" }}>disconnect</span></div>
+      </div>
+    );
+  }
+
+  return <div style={{ padding: "2rem", color: "#484f58" }}>waiting for data…</div>;
+  const derivedAgents = useMemo(() => data ? agentsFromState(data) : [], [data]);
+  const derivedActions = useMemo(() => data ? actionsFromState(data) : [], [data]);
+  const derivedMessages = useMemo(() => data ? messagesFromState(data) : [], [data]);
+
+  // Panel-compatible arrays (matching legacy component interfaces)
+  const panelAgents = useMemo(() => derivedAgents.map(a => ({
+    id: a.id, name: a.def.name, role: a.def.role, status: a.def.status,
+    last_heartbeat: a.def.last_heartbeat ?? "", grants: JSON.stringify(a.def.grants),
+    joined_at: a.def.joined_at ?? "",
+  })), [derivedAgents]);
+
+  const panelState = useMemo(() => {
+    if (!data) return [];
+    return data.state.filter(s => s.scope !== "_audit").map(s => ({
+      room_id: "", scope: s.scope, key: s.key, value: s.value,
+      version: s.revision, sort_key: s.sort_key ?? undefined, updated_at: s.updated_at,
+    }));
+  }, [data]);
+
+  const panelMessages = useMemo(() =>
+    derivedMessages.map(m => ({ sort_key: m.sort_key ?? 0, value: m.value, updated_at: m.updated_at })),
+  [derivedMessages]);
+
+  const panelActions = useMemo(() => derivedActions.map(a => ({
+    id: a.id, room_id: "", scope: a.def.scope ?? "_shared",
+    description: a.def.description, available: a.available,
+    params: a.def.params, writes: a.def.writes, version: 1,
+    registered_by: a.def.registered_by, if: a.def.if,
+  })), [derivedActions]);
+
+  const panelViews = useMemo(() => derivedViews.map(v => ({
+    id: v.id, room_id: "", scope: v.def.scope ?? "_shared",
+    description: v.def.description, expr: v.def.expr,
+    value: v.value, version: 1, registered_by: v.def.registered_by,
+    render: v.def.render ?? null,
+  })), [derivedViews]);
+
+  const panelAudit = useMemo(() =>
+    data?.audit.map(a => ({ sort_key: a.seq, value: a.value, updated_at: a.updated_at })) ?? [],
+  [data]);
+
+  const activeAgents = derivedAgents.filter(a => a.def.status === "active").length;
+  const waitingAgents = derivedAgents.filter(a => a.def.status === "waiting").length;
+  const stateCount = data?.state.filter(s => !s.scope.startsWith("_")).length ?? 0;
+  const scopeCount = data ? allScopes(data).length : 0;
   const viewingId = viewAs || undefined;
   const titleText = dashConfig?.title || "agent-sync";
   const subtitleText = dashConfig?.subtitle || roomId;
 
+  // v8-debug: minimal render to isolate crash
+  // Comment this block out once the issue is found
+  return (
+    <div style={{ padding: "2rem", fontFamily: "monospace", fontSize: "13px", background: "#0d1117", color: "#c9d1d9", minHeight: "100vh" }}>
+      <h2 style={{ color: "#58a6ff" }}>Dashboard loaded ✓</h2>
+      <div style={{ color: "#484f58", marginBottom: "1rem" }}>room: {roomId} · token: {tokenKind} · poll: {pollStatus}</div>
+      <div>agents: {derivedAgents.length}</div>
+      <div>actions: {derivedActions.length}</div>
+      <div>views: {derivedViews.length}</div>
+      <div>messages: {derivedMessages.length}</div>
+      <div>state entries: {data?.state.length ?? 0}</div>
+      <div>audit entries: {data?.audit.length ?? 0}</div>
+      <div>hasSurfaces: {String(hasSurfaces)}</div>
+      <div>activeSurfaces: {activeSurfaces.length}</div>
+      <div style={{ marginTop: "1rem", color: "#484f58" }}>
+        If you see this, hooks + data are fine. The crash is in the JSX render tree.
+      </div>
+      <pre style={{ marginTop: "1rem", fontSize: "10px", color: "#484f58", maxHeight: "300px", overflow: "auto" }}>
+        {JSON.stringify({ panelAgents: panelAgents.slice(0, 2), panelActions: panelActions.slice(0, 2) }, null, 2)}
+      </pre>
+      <div style={{ marginTop: "1rem" }}>
+        <button onClick={doLogout} style={{ background: "#161b22", border: "1px solid #21262d", color: "#c9d1d9", padding: "0.5rem 1rem", borderRadius: "6px", cursor: "pointer", fontFamily: "inherit" }}>disconnect</button>
+      </div>
+    </div>
+  );
+
+  /* ORIGINAL RETURN — temporarily bypassed
   return (
     <Page>
       <Nav active="dashboard" />
@@ -606,21 +711,21 @@ export function Dashboard({ roomId }: DashboardProps) {
             <IdBar>
               <IdLabel>identity:</IdLabel>
               <IdKind $kind={tokenKind}>{tokenKind === "room" ? "room admin" : tokenKind === "view" ? "observer" : "agent"}</IdKind>
-              {tokenKind === "room" && <IdSelect value={viewAs} onChange={(e) => setViewAs(e.target.value)}><option value="">admin (all scopes)</option>{agents.map(a => <option key={a.id} value={a.id}>view as: {a.name || a.id}</option>)}</IdSelect>}
+              {tokenKind === "room" && <IdSelect value={viewAs} onChange={(e) => setViewAs(e.target.value)}><option value="">admin (all scopes)</option>{derivedAgents.map(a => <option key={a.id} value={a.id}>view as: {a.def.name || a.id}</option>)}</IdSelect>}
               {tokenKind === "view" && <span style={{ color: "var(--dim)", fontSize: 11 }}>read-only</span>}
               <Logout onClick={doLogout}>✕ disconnect</Logout>
             </IdBar>
           )}
           {!hasSurfaces && (
             <SummaryBar>
-              <Stat><StatN>{agents.length}</StatN> agents</Stat>
+              <Stat><StatN>{derivedAgents.length}</StatN> agents</Stat>
               {activeAgents > 0 && <Stat $color="var(--green)"><StatN>{activeAgents}</StatN> active</Stat>}
               {waitingAgents > 0 && <Stat $color="var(--yellow)"><StatN>{waitingAgents}</StatN> waiting</Stat>}
-              <Stat><StatN>{state.length}</StatN> keys / <StatN>{scopeCount}</StatN> scopes</Stat>
-              <Stat><StatN>{messages.length}</StatN> msgs</Stat>
-              <Stat $color="var(--green)"><StatN>{actions.length}</StatN> actions</Stat>
-              <Stat $color="var(--purple)"><StatN>{views.length}</StatN> views</Stat>
-              {audit.length > 0 && <Stat $color="var(--orange)"><StatN>{audit.length}</StatN> audit</Stat>}
+              <Stat><StatN>{stateCount}</StatN> keys / <StatN>{scopeCount}</StatN> scopes</Stat>
+              <Stat><StatN>{derivedMessages.length}</StatN> msgs</Stat>
+              <Stat $color="var(--green)"><StatN>{derivedActions.length}</StatN> actions</Stat>
+              <Stat $color="var(--purple)"><StatN>{derivedViews.length}</StatN> views</Stat>
+              {data && data.audit.length > 0 && <Stat $color="var(--orange)"><StatN>{data.audit.length}</StatN> audit</Stat>}
             </SummaryBar>
           )}
         </Headers>
@@ -632,16 +737,16 @@ export function Dashboard({ roomId }: DashboardProps) {
               <>
                 <DebugToggle $open={debugOpen} onClick={() => setDebugOpen(o => !o)}>
                   <span style={{ fontSize: 10, display: "inline-block", transform: debugOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}>▶</span>
-                  {debugOpen ? "hide debug" : "debug"} · {agents.length} agents · {state.length} keys · {actions.length} actions
+                  {debugOpen ? "hide debug" : "debug"} · {derivedAgents.length} agents · {data?.state.length ?? 0} keys · {derivedActions.length} actions
                 </DebugToggle>
                 <DebugSection $open={debugOpen}>
-                  <div style={{ padding: "0 1em" }}><TabsBar>{visibleTabs.map(t => { const a = activeTab === t.id; const c = t.countKey ? (data?.[t.countKey] as any[])?.length ?? 0 : null; return <Tab key={t.id} $active={a} onClick={() => setActiveTab(t.id)}>{t.label}{c !== null && <TabBadge $active={a}>{c}</TabBadge>}</Tab>; })}</TabsBar></div>
-                  <Panel $active={activeTab === "agents"}><AgentsPanel agents={agents} viewingId={viewingId} /></Panel>
-                  <Panel $active={activeTab === "state"}><StatePanel rows={state} agentMap={agentMap} viewingId={viewingId} tokenKind={tokenKind} /></Panel>
-                  <Panel $active={activeTab === "messages"}><MessagesPanel messages={messages} agentMap={agentMap} roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
-                  <Panel $active={activeTab === "actions"}><ActionsPanel actions={actions} roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
-                  <Panel $active={activeTab === "views"}><ViewsPanel views={views} /></Panel>
-                  <Panel $active={activeTab === "audit"}><AuditPanel audit={audit} agentMap={agentMap} /></Panel>
+                  <div style={{ padding: "0 1em" }}><TabsBar>{visibleTabs.map(t => { const a = activeTab === t.id; const counts: Record<string, number> = { agents: panelAgents.length, state: panelState.length, messages: panelMessages.length, actions: panelActions.length, views: panelViews.length, audit: panelAudit.length }; const c = counts[t.id] ?? null; return <Tab key={t.id} $active={a} onClick={() => setActiveTab(t.id)}>{t.label}{c !== null && <TabBadge $active={a}>{c}</TabBadge>}</Tab>; })}</TabsBar></div>
+                  <Panel $active={activeTab === "agents"}><AgentsPanel agents={panelAgents} viewingId={viewingId} /></Panel>
+                  <Panel $active={activeTab === "state"}><StatePanel rows={panelState} agentMap={agentMap as any} viewingId={viewingId} tokenKind={tokenKind} /></Panel>
+                  <Panel $active={activeTab === "messages"}><MessagesPanel messages={panelMessages} agentMap={agentMap as any} roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
+                  <Panel $active={activeTab === "actions"}><ActionsPanel actions={panelActions} roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
+                  <Panel $active={activeTab === "views"}><ViewsPanel views={panelViews} /></Panel>
+                  <Panel $active={activeTab === "audit"}><AuditPanel audit={panelAudit} agentMap={agentMap as any} /></Panel>
                   <Panel $active={activeTab === "cel"}><CelPanel roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
                 </DebugSection>
               </>
@@ -651,17 +756,18 @@ export function Dashboard({ roomId }: DashboardProps) {
 
         {!hasSurfaces && (
           <>
-            <div style={{ padding: "0 1em" }}><TabsBar>{visibleTabs.map(t => { const a = activeTab === t.id; const c = t.countKey ? (data?.[t.countKey] as any[])?.length ?? 0 : null; return <Tab key={t.id} $active={a} onClick={() => setActiveTab(t.id)}>{t.label}{c !== null && <TabBadge $active={a}>{c}</TabBadge>}</Tab>; })}</TabsBar></div>
-            <Panel $active={activeTab === "agents"}><AgentsPanel agents={agents} viewingId={viewingId} /></Panel>
-            <Panel $active={activeTab === "state"}><StatePanel rows={state} agentMap={agentMap} viewingId={viewingId} tokenKind={tokenKind} /></Panel>
-            <Panel $active={activeTab === "messages"}><MessagesPanel messages={messages} agentMap={agentMap} roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
-            <Panel $active={activeTab === "actions"}><ActionsPanel actions={actions} roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
-            <Panel $active={activeTab === "views"}><ViewsPanel views={views} /></Panel>
-            <Panel $active={activeTab === "audit"}><AuditPanel audit={audit} agentMap={agentMap} /></Panel>
+            <div style={{ padding: "0 1em" }}><TabsBar>{visibleTabs.map(t => { const a = activeTab === t.id; const counts: Record<string, number> = { agents: panelAgents.length, state: panelState.length, messages: panelMessages.length, actions: panelActions.length, views: panelViews.length, audit: panelAudit.length }; const c = counts[t.id] ?? null; return <Tab key={t.id} $active={a} onClick={() => setActiveTab(t.id)}>{t.label}{c !== null && <TabBadge $active={a}>{c}</TabBadge>}</Tab>; })}</TabsBar></div>
+            <Panel $active={activeTab === "agents"}><AgentsPanel agents={panelAgents} viewingId={viewingId} /></Panel>
+            <Panel $active={activeTab === "state"}><StatePanel rows={panelState} agentMap={agentMap as any} viewingId={viewingId} tokenKind={tokenKind} /></Panel>
+            <Panel $active={activeTab === "messages"}><MessagesPanel messages={panelMessages} agentMap={agentMap as any} roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
+            <Panel $active={activeTab === "actions"}><ActionsPanel actions={panelActions} roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
+            <Panel $active={activeTab === "views"}><ViewsPanel views={panelViews} /></Panel>
+            <Panel $active={activeTab === "audit"}><AuditPanel audit={panelAudit} agentMap={agentMap as any} /></Panel>
             <Panel $active={activeTab === "cel"}><CelPanel roomId={roomId} baseUrl={BASE_URL} authHeaders={authHeaders} /></Panel>
           </>
         )}
       </Main>
     </Page>
   );
+  END OF ORIGINAL RETURN */
 }

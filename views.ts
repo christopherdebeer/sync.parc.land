@@ -1,7 +1,8 @@
 /**
  * views.ts — View registration and deletion.
  *
- * Handles computed view CRUD with CEL expression validation and evaluation.
+ * v8: Views are state. Definitions stored in _views scope only.
+ * Legacy views table removed — all reads and writes go through state.
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";
@@ -10,6 +11,7 @@ import { json, rows2objects } from "./utils.ts";
 import { validateCel, buildContext, buildViewContext } from "./cel.ts";
 import { parseTimer, validateTimer } from "./timers.ts";
 import { appendStructuralEvent } from "./audit.ts";
+import { extractDependencies } from "./deps.ts";
 import type { AuthResult } from "./auth.ts";
 
 export async function registerView(roomId: string, body: any, auth: AuthResult) {
@@ -34,37 +36,37 @@ export async function registerView(roomId: string, body: any, auth: AuthResult) 
     if (!ev.valid) return json({ error: "invalid_cel", field: "enabled", detail: ev.error }, 400);
   }
 
-  let timerCols = parseTimer(null);
   if (body.timer) {
     const tv = validateTimer(body.timer);
     if (!tv.valid) return json({ error: "invalid_timer", detail: tv.error }, 400);
-    timerCols = parseTimer(body.timer);
   }
 
   const registeredBy = scope !== "_shared" ? scope : (body.registered_by ?? (auth.authenticated ? auth.agentId : null));
 
-  await sqlite.execute({
-    sql: `INSERT INTO views (id, room_id, scope, description, expr, enabled_expr, render_json,
-            timer_json, timer_expires_at, timer_ticks_left, timer_tick_on, timer_effect, timer_started_at,
-            registered_by, version)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-          ON CONFLICT(id, room_id) DO UPDATE SET
-            scope = excluded.scope, description = excluded.description, expr = excluded.expr,
-            enabled_expr = excluded.enabled_expr, render_json = excluded.render_json,
-            timer_json = excluded.timer_json, timer_expires_at = excluded.timer_expires_at,
-            timer_ticks_left = excluded.timer_ticks_left, timer_tick_on = excluded.timer_tick_on,
-            timer_effect = excluded.timer_effect, timer_started_at = excluded.timer_started_at,
-            registered_by = excluded.registered_by,
-            version = views.version + 1`,
-    args: [id, roomId, scope, body.description ?? null, body.expr, body.enabled ?? null,
-           body.render ? JSON.stringify(body.render) : null,
-           timerCols.timer_json, timerCols.timer_expires_at, timerCols.timer_ticks_left,
-           timerCols.timer_tick_on, timerCols.timer_effect, timerCols.timer_started_at, registeredBy],
-  });
+  // Extract CEL dependencies at registration time
+  let deps: any[] = [];
+  try {
+    deps = extractDependencies(body.expr);
+  } catch { /* non-fatal — deps will be empty */ }
 
-  // Return with resolved value
-  const result = await sqlite.execute({ sql: `SELECT * FROM views WHERE id = ? AND room_id = ?`, args: [id, roomId] });
-  const view = rows2objects(result)[0];
+  // Write to _views scope (single source of truth)
+  const viewStateValue = JSON.stringify({
+    expr: body.expr,
+    description: body.description ?? null,
+    enabled: body.enabled ?? null,
+    render: body.render ?? null,
+    scope,
+    registered_by: registeredBy,
+    timer: body.timer ?? null,
+    deps,
+  });
+  await sqlite.execute({
+    sql: `INSERT INTO state (room_id, scope, key, value, version, revision, updated_at)
+          VALUES (?, '_views', ?, ?, '', 1, datetime('now'))
+          ON CONFLICT(room_id, scope, key) DO UPDATE SET
+            value = excluded.value, revision = state.revision + 1, updated_at = datetime('now')`,
+    args: [roomId, id, viewStateValue],
+  });
 
   // Evaluate current value
   const ctx = await buildContext(roomId, { selfAgent: auth.agentId ?? undefined });
@@ -78,31 +80,35 @@ export async function registerView(roomId: string, body: any, auth: AuthResult) 
   }
 
   appendStructuralEvent(roomId, "register_view", auth.authenticated ? auth.agentId ?? null : null, {
-    id: body.id, scope, description: body.description ?? null,
+    id, scope, description: body.description ?? null,
     expr: body.expr, enabled_expr: body.enabled ?? null,
-    render: body.render ?? null,
+    render: body.render ?? null, deps,
   }).catch(() => {});
 
   return json({
-    id: view.id, room_id: view.room_id, scope: view.scope, description: view.description,
-    expr: view.expr, enabled: view.enabled_expr,
-    render: view.render_json ? (() => { try { return JSON.parse(view.render_json); } catch { return null; } })() : null,
-    registered_by: view.registered_by,
-    version: view.version, created_at: view.created_at,
-    value: resolvedValue,
+    id, room_id: roomId, scope, description: body.description ?? null,
+    expr: body.expr, enabled: body.enabled ?? null,
+    render: body.render ?? null,
+    registered_by: registeredBy,
+    value: resolvedValue, deps,
   }, 201);
 }
 
 export async function deleteView(roomId: string, viewId: string, auth: AuthResult) {
-  const existing = await sqlite.execute({ sql: `SELECT scope FROM views WHERE id = ? AND room_id = ?`, args: [viewId, roomId] });
+  const existing = await sqlite.execute({
+    sql: `SELECT value FROM state WHERE room_id = ? AND scope = '_views' AND key = ?`,
+    args: [roomId, viewId],
+  });
   if (existing.rows.length === 0) return json({ error: "view not found" }, 404);
-  const scope = existing.rows[0][0] ?? "_shared";
+  let def: any = {};
+  try { def = JSON.parse(existing.rows[0][0] as string); } catch {}
+  const scope = def.scope ?? "_shared";
   if (scope !== "_shared") {
     if (auth.kind !== "room" && !auth.grants.includes("*") && auth.agentId !== scope) {
       return json({ error: "view_owned", message: `view "${viewId}" owned by "${scope}"` }, 403);
     }
   }
-  await sqlite.execute({ sql: `DELETE FROM views WHERE id = ? AND room_id = ?`, args: [viewId, roomId] });
+  await sqlite.execute({ sql: `DELETE FROM state WHERE room_id = ? AND scope = '_views' AND key = ?`, args: [roomId, viewId] });
   appendStructuralEvent(roomId, "delete_view", auth.authenticated ? auth.agentId ?? null : null, { id: viewId }).catch(() => {});
   return json({ deleted: true, id: viewId });
 }

@@ -6,10 +6,13 @@
  * - Structural entries: agent join/update, action/view register/delete
  *
  * Both are appended to the _audit scope in room state. Never throws.
+ *
+ * v8: Also populates log_index for key-based temporal queries.
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";
 import { rows2objects } from "./utils.ts";
+import { indexLogEntry } from "./schema-v8.ts";
 
 /** Append a structured audit entry to the _audit scope (fire-and-forget).
  *
@@ -52,6 +55,15 @@ export async function appendAuditEntry(
             VALUES (?, '_audit', ?, ?, ?, 1, datetime('now'))`,
       args: [roomId, String(seq), seq, JSON.stringify(entry)],
     });
+
+    // v8: populate log_index for key-based temporal queries
+    const affectedKeys: Array<{ scope: string; key: string }> = [];
+    if (executedWrites && executedWrites.length > 0 && status < 400) {
+      for (const w of executedWrites) {
+        if (w.scope && w.key) affectedKeys.push({ scope: w.scope, key: w.key });
+      }
+    }
+    indexLogEntry(roomId, seq, affectedKeys).catch(() => {});
   } catch {}
 }
 
@@ -85,5 +97,26 @@ export async function appendStructuralEvent(
             VALUES (?, '_audit', ?, ?, ?, 1, datetime('now'))`,
       args: [roomId, String(seq), seq, entry],
     });
+
+    // v8: populate log_index for structural events
+    const affectedKeys: Array<{ scope: string; key: string }> = [];
+    if (schema.id) {
+      if (kind.includes("action")) {
+        affectedKeys.push({ scope: "_actions", key: schema.id });
+      } else if (kind.includes("view")) {
+        affectedKeys.push({ scope: "_views", key: schema.id });
+      } else if (kind === "agent_join" || kind === "agent_update") {
+        affectedKeys.push({ scope: "_agents", key: schema.id });
+      }
+    }
+    // Also index any state keys mentioned in the schema (e.g. action write targets)
+    if (schema.writes && Array.isArray(schema.writes)) {
+      for (const w of schema.writes) {
+        if (w.scope && w.key && !w.key.includes("${")) {
+          affectedKeys.push({ scope: w.scope, key: w.key });
+        }
+      }
+    }
+    indexLogEntry(roomId, seq, affectedKeys).catch(() => {});
   } catch {}
 }

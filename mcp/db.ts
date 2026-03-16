@@ -423,100 +423,6 @@ export async function deleteSession(sessionId: string) {
   });
 }
 
-// ─── Vault CRUD ─────────────────────────────────────────────────
-
-export async function vaultStore(entry: {
-  userId: string;
-  roomId: string;
-  token: string;
-  tokenType: string;
-  label?: string;
-  isDefault?: boolean;
-}) {
-  const id = generateId();
-  if (entry.isDefault) {
-    await sqlite.execute({
-      sql: "UPDATE smcp_vault SET is_default = 0 WHERE user_id = ?",
-      args: [entry.userId],
-    });
-  }
-  await sqlite.execute({
-    sql:
-      `INSERT INTO smcp_vault (id, user_id, room_id, token, token_type, label, is_default)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    args: [
-      id,
-      entry.userId,
-      entry.roomId,
-      entry.token,
-      entry.tokenType,
-      entry.label ?? null,
-      entry.isDefault ? 1 : 0,
-    ],
-  });
-  return id;
-}
-
-export async function vaultGetForRoom(userId: string, roomId: string) {
-  const res = await sqlite.execute({
-    sql:
-      "SELECT * FROM smcp_vault WHERE user_id = ? AND room_id = ? ORDER BY token_type ASC",
-    args: [userId, roomId],
-  });
-  return res.rows.map((r) => ({
-    id: r[0] as string,
-    userId: r[1] as string,
-    roomId: r[2] as string,
-    token: r[3] as string,
-    tokenType: r[4] as string,
-    label: r[5] as string | null,
-    isDefault: r[6] === 1,
-  }));
-}
-
-export async function vaultGetDefault(userId: string) {
-  const res = await sqlite.execute({
-    sql:
-      "SELECT * FROM smcp_vault WHERE user_id = ? AND is_default = 1 LIMIT 1",
-    args: [userId],
-  });
-  if (res.rows.length === 0) return null;
-  const r = res.rows[0];
-  return {
-    id: r[0] as string,
-    userId: r[1] as string,
-    roomId: r[2] as string,
-    token: r[3] as string,
-    tokenType: r[4] as string,
-    label: r[5] as string | null,
-    isDefault: true,
-  };
-}
-
-export async function vaultList(userId: string) {
-  const res = await sqlite.execute({
-    sql:
-      "SELECT * FROM smcp_vault WHERE user_id = ? ORDER BY is_default DESC, created_at DESC",
-    args: [userId],
-  });
-  return res.rows.map((r) => ({
-    id: r[0] as string,
-    userId: r[1] as string,
-    roomId: r[2] as string,
-    token: r[3] as string,
-    tokenType: r[4] as string,
-    label: r[5] as string | null,
-    isDefault: r[6] === 1,
-  }));
-}
-
-export async function vaultDelete(userId: string, vaultId: string) {
-  await sqlite.execute({
-    sql: "DELETE FROM smcp_vault WHERE id = ? AND user_id = ?",
-    args: [vaultId, userId],
-  });
-}
-
 // ─── Recovery Token CRUD ─────────────────────────────────────────
 
 const RECOVERY_EXPIRY_DAYS = 90;
@@ -801,43 +707,6 @@ export async function removeAllEmbodiments(sessionHash: string) {
   });
 }
 
-// ─── Vault → User-Rooms Migration (one-time) ────────────────────
-
-export async function migrateVaultToUserRooms() {
-  const count = await sqlite.execute({
-    sql: "SELECT COUNT(*) FROM smcp_user_rooms", args: [],
-  });
-  if (Number(count.rows[0][0]) > 0) return;
-
-  const vaultEntries = await sqlite.execute({
-    sql: `SELECT DISTINCT user_id, room_id FROM smcp_vault
-          WHERE token_type = 'room'`,
-    args: [],
-  });
-  if (vaultEntries.rows.length === 0) return;
-
-  const stmts = vaultEntries.rows.map(r => ({
-    sql: `INSERT OR IGNORE INTO smcp_user_rooms
-            (user_id, room_id, access, is_default)
-          VALUES (?, ?, 'owner', 0)`,
-    args: [r[0] as string, r[1] as string],
-  }));
-  await sqlite.batch(stmts);
-
-  const defaults = await sqlite.execute({
-    sql: `SELECT user_id, room_id FROM smcp_vault
-          WHERE is_default = 1 AND token_type = 'room'`,
-    args: [],
-  });
-  for (const r of defaults.rows) {
-    await sqlite.execute({
-      sql: `UPDATE smcp_user_rooms SET is_default = 1
-            WHERE user_id = ? AND room_id = ?`,
-      args: [r[0] as string, r[1] as string],
-    });
-  }
-}
-
 export async function findSessionsByUserClient(
   userId: string, clientId: string, excludeHash?: string,
 ) {
@@ -850,4 +719,287 @@ export async function findSessionsByUserClient(
   }
   const res = await sqlite.execute({ sql, args });
   return res.rows.map(r => r[0] as string);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// Unified Tokens (Phase 1 — v7 auth model)
+// ═══════════════════════════════════════════════════════════════════
+
+export async function mintToken(params: {
+  userId: string;
+  scope: string;
+  label?: string;
+  roomId?: string;
+  agentId?: string;
+  clientId?: string;
+  expiresInSec?: number;
+  withRefresh?: boolean;
+}): Promise<{ id: string; token: string; refreshToken?: string; expiresAt: string | null }> {
+  const id = generateId();
+  const token = await generateToken("tok");
+  const tokenHash = await sha256(token);
+  const expiresAt = params.expiresInSec
+    ? new Date(Date.now() + params.expiresInSec * 1000).toISOString()
+    : null;
+
+  let refreshToken: string | undefined;
+  let refreshHash: string | null = null;
+  if (params.withRefresh) {
+    refreshToken = await generateToken("ref");
+    refreshHash = await sha256(refreshToken);
+  }
+
+  await sqlite.execute({
+    sql: `INSERT INTO tokens (id, token_hash, refresh_hash, minted_by, scope, label,
+            room_id, agent_id, client_id, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, tokenHash, refreshHash, params.userId, params.scope,
+           params.label ?? null, params.roomId ?? null, params.agentId ?? null,
+           params.clientId ?? null, expiresAt],
+  });
+
+  return { id, token, refreshToken, expiresAt };
+}
+
+export async function validateTokenByHash(hash: string): Promise<{
+  id: string; mintedBy: string; scope: string; label: string | null;
+  roomId: string | null; agentId: string | null; clientId: string | null;
+  expiresAt: string | null; createdAt: string;
+} | null> {
+  const res = await sqlite.execute({
+    sql: `SELECT id, minted_by, scope, label, room_id, agent_id, client_id,
+            expires_at, created_at
+          FROM tokens
+          WHERE token_hash = ? AND revoked = 0
+            AND (expires_at IS NULL OR expires_at > datetime('now'))`,
+    args: [hash],
+  });
+  if (res.rows.length === 0) return null;
+  const r = res.rows[0];
+  return {
+    id: r[0] as string, mintedBy: r[1] as string, scope: r[2] as string,
+    label: r[3] as string | null, roomId: r[4] as string | null,
+    agentId: r[5] as string | null, clientId: r[6] as string | null,
+    expiresAt: r[7] as string | null, createdAt: r[8] as string,
+  };
+}
+
+export async function validateRefreshByHash(hash: string): Promise<{
+  id: string; mintedBy: string; scope: string; clientId: string | null;
+} | null> {
+  const res = await sqlite.execute({
+    sql: `SELECT id, minted_by, scope, client_id
+          FROM tokens
+          WHERE refresh_hash = ? AND revoked = 0
+            AND (expires_at IS NULL OR expires_at > datetime('now'))`,
+    args: [hash],
+  });
+  if (res.rows.length === 0) return null;
+  const r = res.rows[0];
+  return {
+    id: r[0] as string, mintedBy: r[1] as string,
+    scope: r[2] as string, clientId: r[3] as string | null,
+  };
+}
+
+export async function refreshUnifiedToken(oldRefreshHash: string, newExpiresInSec = 3600): Promise<{
+  id: string; token: string; refreshToken: string; expiresAt: string;
+} | null> {
+  const old = await validateRefreshByHash(oldRefreshHash);
+  if (!old) return null;
+
+  // Revoke old token
+  await sqlite.execute({
+    sql: `UPDATE tokens SET revoked = 1 WHERE id = ?`,
+    args: [old.id],
+  });
+
+  // Mint new with same scope
+  const result = await mintToken({
+    userId: old.mintedBy,
+    scope: old.scope,
+    clientId: old.clientId ?? undefined,
+    expiresInSec: newExpiresInSec,
+    withRefresh: true,
+  });
+
+  // Transfer embodiments from old token to new
+  await sqlite.execute({
+    sql: `UPDATE smcp_embodiments SET session_hash = ?
+          WHERE session_hash = (SELECT token_hash FROM tokens WHERE id = ?)`,
+    args: [await sha256(result.token), old.id],
+  }).catch(() => {});
+
+  return {
+    id: result.id,
+    token: result.token,
+    refreshToken: result.refreshToken!,
+    expiresAt: result.expiresAt!,
+  };
+}
+
+export async function revokeToken(tokenId: string, userId: string): Promise<boolean> {
+  const res = await sqlite.execute({
+    sql: `UPDATE tokens SET revoked = 1 WHERE id = ? AND minted_by = ?`,
+    args: [tokenId, userId],
+  });
+  return (res.rowsAffected ?? 0) > 0;
+}
+
+export async function listUserTokens(userId: string): Promise<Array<{
+  id: string; scope: string; label: string | null; roomId: string | null;
+  agentId: string | null; clientId: string | null; revoked: boolean;
+  expiresAt: string | null; createdAt: string;
+}>> {
+  const res = await sqlite.execute({
+    sql: `SELECT id, scope, label, room_id, agent_id, client_id, revoked,
+            expires_at, created_at
+          FROM tokens WHERE minted_by = ?
+          ORDER BY created_at DESC LIMIT 100`,
+    args: [userId],
+  });
+  return res.rows.map((r: any[]) => ({
+    id: r[0] as string, scope: r[1] as string, label: r[2] as string | null,
+    roomId: r[3] as string | null, agentId: r[4] as string | null,
+    clientId: r[5] as string | null, revoked: r[6] === 1,
+    expiresAt: r[7] as string | null, createdAt: r[8] as string,
+  }));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Device Authorization Codes
+// ═══════════════════════════════════════════════════════════════════
+
+function generateUserCode(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I/O/0/1
+  const left = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  const right = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  return `${left}-${right}`;
+}
+
+export async function createDeviceCode(scope: string, clientId?: string): Promise<{
+  deviceCode: string; userCode: string; expiresAt: string;
+}> {
+  const deviceCode = await generateToken("dev");
+  let userCode = generateUserCode();
+
+  // Ensure unique user_code (unlikely collision but be safe)
+  for (let i = 0; i < 5; i++) {
+    try {
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 min
+      await sqlite.execute({
+        sql: `INSERT INTO device_codes (device_code, user_code, client_id, scope, expires_at)
+              VALUES (?, ?, ?, ?, ?)`,
+        args: [deviceCode, userCode, clientId ?? "cli", scope, expiresAt],
+      });
+      return { deviceCode, userCode, expiresAt };
+    } catch (e: any) {
+      if (e.message?.includes("UNIQUE") && e.message?.includes("user_code")) {
+        userCode = generateUserCode();
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error("Failed to generate unique user code");
+}
+
+export async function getDeviceCode(deviceCode: string): Promise<{
+  deviceCode: string; userCode: string; scope: string; status: string;
+  approvedBy: string | null; expiresAt: string;
+} | null> {
+  const res = await sqlite.execute({
+    sql: `SELECT device_code, user_code, scope, status, approved_by, expires_at
+          FROM device_codes WHERE device_code = ?`,
+    args: [deviceCode],
+  });
+  if (res.rows.length === 0) return null;
+  const r = res.rows[0];
+  return {
+    deviceCode: r[0] as string, userCode: r[1] as string,
+    scope: r[2] as string, status: r[3] as string,
+    approvedBy: r[4] as string | null, expiresAt: r[5] as string,
+  };
+}
+
+export async function getDeviceCodeByUserCode(userCode: string): Promise<{
+  deviceCode: string; userCode: string; scope: string; status: string;
+  approvedBy: string | null; expiresAt: string;
+} | null> {
+  const res = await sqlite.execute({
+    sql: `SELECT device_code, user_code, scope, status, approved_by, expires_at
+          FROM device_codes
+          WHERE user_code = ? AND expires_at > datetime('now')`,
+    args: [userCode],
+  });
+  if (res.rows.length === 0) return null;
+  const r = res.rows[0];
+  return {
+    deviceCode: r[0] as string, userCode: r[1] as string,
+    scope: r[2] as string, status: r[3] as string,
+    approvedBy: r[4] as string | null, expiresAt: r[5] as string,
+  };
+}
+
+export async function approveDeviceCode(deviceCode: string, userId: string): Promise<boolean> {
+  const res = await sqlite.execute({
+    sql: `UPDATE device_codes SET status = 'approved', approved_by = ?
+          WHERE device_code = ? AND status = 'pending'
+          AND expires_at > datetime('now')`,
+    args: [userId, deviceCode],
+  });
+  return (res.rowsAffected ?? 0) > 0;
+}
+
+export async function denyDeviceCode(deviceCode: string): Promise<boolean> {
+  const res = await sqlite.execute({
+    sql: `UPDATE device_codes SET status = 'denied'
+          WHERE device_code = ? AND status = 'pending'`,
+    args: [deviceCode],
+  });
+  return (res.rowsAffected ?? 0) > 0;
+}
+
+export async function consumeDeviceCode(deviceCode: string): Promise<{
+  scope: string; approvedBy: string;
+} | null> {
+  const dc = await getDeviceCode(deviceCode);
+  if (!dc || dc.status !== "approved" || !dc.approvedBy) return null;
+  if (new Date(dc.expiresAt) < new Date()) return null;
+  // Mark consumed by setting status
+  await sqlite.execute({
+    sql: `UPDATE device_codes SET status = 'consumed' WHERE device_code = ?`,
+    args: [deviceCode],
+  });
+  return { scope: dc.scope, approvedBy: dc.approvedBy };
+}
+
+export async function cleanupDeviceCodes() {
+  await sqlite.execute({
+    sql: `DELETE FROM device_codes WHERE expires_at < datetime('now')`,
+    args: [],
+  });
+}
+
+// ─── Room invitation ─────────────────────────────────────────────
+
+export async function inviteUserToRoom(
+  userId: string, roomId: string, role: string, invitedBy: string, label?: string,
+) {
+  await sqlite.execute({
+    sql: `INSERT INTO smcp_user_rooms (user_id, room_id, access, invited_by, label)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(user_id, room_id) DO UPDATE SET
+            access = excluded.access, invited_by = excluded.invited_by`,
+    args: [userId, roomId, role, invitedBy, label ?? null],
+  });
+}
+
+
+export async function updateDeviceCodeScope(deviceCode: string, scope: string) {
+  await sqlite.execute({
+    sql: `UPDATE device_codes SET scope = ? WHERE device_code = ?`,
+    args: [scope, deviceCode],
+  });
 }

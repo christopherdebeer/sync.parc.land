@@ -1,7 +1,7 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
 import { styled } from "../../styled.ts";
 import type { Agent } from "../../types.ts";
-import { rel, hbc } from "../../utils.ts";
+import { rel, relTo, hbc, hbcAt } from "../../utils.ts";
 
 const Grid = styled.div`display: flex; flex-wrap: wrap; gap: 0.5rem;`;
 
@@ -54,16 +54,20 @@ const Empty = styled.div`color: var(--dim); font-style: italic; padding: 1rem; t
 interface AgentsPanelProps {
   agents: Agent[];
   viewingId?: string;
+  /** When set, heartbeat timestamps display as +Xs relative to this epoch. */
+  epochMs?: number;
+  /** Current replay playhead ms — used for heartbeat staleness in replay. */
+  playheadMs?: number;
 }
 
-export function AgentsPanel({ agents, viewingId }: AgentsPanelProps) {
+export function AgentsPanel({ agents, viewingId, epochMs, playheadMs }: AgentsPanelProps) {
   if (!agents.length) return <Empty>no agents</Empty>;
 
   return (
     <Grid>
       {agents.map(a => {
         const sc = a.status || "active";
-        const hbClass = hbc(a.last_heartbeat);
+        const hbClass = playheadMs != null ? hbcAt(a.last_heartbeat, playheadMs) : hbc(a.last_heartbeat);
         let grants: string[] = [];
         try { grants = JSON.parse(a.grants || "[]"); } catch {}
 
@@ -74,7 +78,7 @@ export function AgentsPanel({ agents, viewingId }: AgentsPanelProps) {
             <Sub>{a.role} · {a.id}</Sub>
             {a.waiting_on && <WaitingOn>⏳ {a.waiting_on}</WaitingOn>}
             {grants.length > 0 && <Grants>grants: {grants.join(", ")}</Grants>}
-            <Heartbeat $cls={hbClass}>{rel(a.last_heartbeat)}</Heartbeat>
+            <Heartbeat $cls={hbClass}>{epochMs != null ? relTo(a.last_heartbeat, epochMs) : rel(a.last_heartbeat)}</Heartbeat>
           </Card>
         );
       })}

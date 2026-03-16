@@ -22,14 +22,15 @@
  * The widget is entirely read-only. No tokens are written, no mutations issued.
  */
 
-import { useCallback, useEffect, useRef, useState } from "https://esm.sh/react@18.2.0";
+import { useCallback, useEffect, useMemo, useRef, useState } from "https://esm.sh/react@18.2.0";
 import { styled, keyframes } from "../styled.ts";
-import type { AuditRow, PollData, Agent } from "../types.ts";
+import type { AuditRow, Agent, View, Surface } from "../types.ts";
 import { AgentsPanel } from "./panels/Agents.tsx";
 import { StatePanel } from "./panels/State.tsx";
 import { MessagesPanel } from "./panels/Messages.tsx";
 import { ActionsPanel } from "./panels/Actions.tsx";
 import { ViewsPanel } from "./panels/Views.tsx";
+import { SurfacesView, type SurfaceContext } from "./panels/Surfaces.tsx";
 
 // Lazily resolved at call time so it works during SSR (no location available)
 function getBaseUrl(): string {
@@ -400,6 +401,21 @@ function describeAuditEntry(entry: any): string {
   }
 }
 
+// ── Render hint → Surface converter (mirrors Dashboard.tsx logic) ─────────────
+
+function renderHintToSurface(view: View): Surface {
+  const hint = view.render!;
+  const id = `auto-${view.id}`;
+  const label = hint.label || view.description || view.id;
+  switch (hint.type) {
+    case "metric": return { id, type: "metric", view: view.id, label };
+    case "markdown": return { id, type: "markdown", view: view.id, label };
+    case "array-table": return { id, type: "array-table", view: view.id, label, columns: hint.columns, max_rows: hint.max_rows };
+    case "view-table": return { id, type: "view-table", views: [view.id], label };
+    default: return { id, type: "metric", view: view.id, label };
+  }
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 interface ReplayWidgetProps {
@@ -408,7 +424,7 @@ interface ReplayWidgetProps {
   height?: number;
 }
 
-type ReplayTab = "agents" | "state" | "messages" | "actions" | "views";
+type ReplayTab = "surfaces" | "agents" | "state" | "messages" | "actions" | "views";
 
 export function ReplayWidget({ roomId, viewToken, height = 420 }: ReplayWidgetProps) {
   const [auditLog, setAuditLog] = useState<AuditRow[]>([]);
@@ -442,7 +458,13 @@ export function ReplayWidget({ roomId, viewToken, height = 420 }: ReplayWidgetPr
         return r.json();
       })
       .then((data: any) => {
-        const log: AuditRow[] = (data.audit || []).slice().sort(
+        // v8: audit entries have `seq` instead of `sort_key`. Normalize.
+        const rawAudit = data.audit || [];
+        const log: AuditRow[] = rawAudit.map((a: any) => ({
+          sort_key: a.sort_key ?? a.seq ?? 0,
+          value: a.value,
+          updated_at: a.updated_at ?? "",
+        })).sort(
           (a: AuditRow, b: AuditRow) => Number(a.sort_key) - Number(b.sort_key)
         );
         setAuditLog(log);
@@ -588,7 +610,39 @@ export function ReplayWidget({ roomId, viewToken, height = 420 }: ReplayWidgetPr
   const agentMap: Record<string, Agent> = {};
   for (const a of agents) agentMap[a.id] = a;
 
+  // ── Surfaces from views with render hints ──────────────────────────────────
+  const activeSurfaces = useMemo<Surface[]>(() => {
+    return views
+      .filter((v: any) => v.render)
+      .sort((a: any, b: any) => (a.render?.order ?? 999) - (b.render?.order ?? 999))
+      .map((v: any) => renderHintToSurface(v as View));
+  }, [views]);
+
+  const hasSurfaces = activeSurfaces.length > 0;
+
+  // Auto-switch to surfaces tab when surfaces become available
+  useEffect(() => {
+    if (hasSurfaces && activeTab === "agents") setActiveTab("surfaces");
+  }, [hasSurfaces]);
+
+  const surfaceCtx = useMemo<SurfaceContext | null>(() => {
+    if (!snapshot || !hasSurfaces) return null;
+    return {
+      views: views.map((v: any) => ({ id: v.id, value: v.value, description: v.description, render: v.render })),
+      actions: actions.map((a: any) => ({ id: a.id, available: a.available !== false, description: a.description, params: a.params, writes: a.writes, if: a.if })),
+      messages: messages.map((m: any) => ({ sort_key: m.sort_key ?? 0, value: m.value, updated_at: m.updated_at ?? "" })),
+      state: state.map((s: any) => ({ scope: s.scope ?? "_shared", key: s.key ?? "", value: s.value })),
+      agentMap: Object.fromEntries(agents.map(a => [a.id, { name: a.name }])),
+      roomId,
+      baseUrl: getBaseUrl(),
+      authHeaders: () => authHeadersRef.current,
+      evalCel: () => true,
+      readOnly: true,
+    };
+  }, [snapshot, agents, state, messages, actions, views, roomId, hasSurfaces]);
+
   const tabs: { id: ReplayTab; label: string; count: number }[] = [
+    ...(hasSurfaces ? [{ id: "surfaces" as ReplayTab, label: "Surfaces", count: activeSurfaces.length }] : []),
     { id: "agents", label: "Agents", count: agents.length },
     { id: "state", label: "State", count: state.length },
     { id: "messages", label: "Messages", count: messages.length },
@@ -630,10 +684,13 @@ export function ReplayWidget({ roomId, viewToken, height = 420 }: ReplayWidgetPr
           <EmptyState>no data</EmptyState>
         ) : (
           <>
+            {activeTab === "surfaces" && surfaceCtx && (
+              <SurfacesView surfaces={activeSurfaces} ctx={surfaceCtx} />
+            )}
             {activeTab === "agents" && (
               agents.length === 0
                 ? <EmptyState>no agents at this point</EmptyState>
-                : <AgentsPanel agents={agents} />
+                : <AgentsPanel agents={agents} epochMs={firstMs} playheadMs={currentMs} />
             )}
             {activeTab === "state" && (
               state.length === 0
@@ -650,6 +707,8 @@ export function ReplayWidget({ roomId, viewToken, height = 420 }: ReplayWidgetPr
                     baseUrl={getBaseUrl()}
                     authHeaders={() => authHeadersRef.current}
                     autoScroll={false}
+                    readOnly
+                    epochMs={firstMs}
                   />
             )}
             {activeTab === "actions" && (
@@ -660,6 +719,7 @@ export function ReplayWidget({ roomId, viewToken, height = 420 }: ReplayWidgetPr
                     roomId={roomId}
                     baseUrl={getBaseUrl()}
                     authHeaders={() => authHeadersRef.current}
+                    readOnly
                   />
             )}
             {activeTab === "views" && (

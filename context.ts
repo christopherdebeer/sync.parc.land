@@ -1,9 +1,11 @@
 /**
- * context.ts — Context assembly, dashboard polling, and CEL evaluation endpoint.
+ * context.ts — Context assembly and CEL evaluation endpoint.
  *
- * Contains buildExpandedContext (the main context builder), dashboardPoll
- * (parallel query bundle for the dashboard UI), evalExpression, and
- * the ContextRequest interface + parser.
+ * Contains buildExpandedContext (the main context builder for MCP /context endpoint),
+ * evalExpression, and the ContextRequest interface + parser.
+ *
+ * v8: Dashboard polling moved to poll-v8.ts (state-only, no legacy tables).
+ * The old dashboardPoll has been removed.
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";
@@ -12,9 +14,10 @@ import { json, rows2objects } from "./utils.ts";
 import { buildContext, buildViewContext, evalCel, type BuildContextOptions } from "./cel.ts";
 import { isTimerLive } from "./timers.ts";
 import { hasFullReadAccess, touchAgent, type AuthResult } from "./auth.ts";
-import { formatAction, computeContestedTargets } from "./actions.ts";
+import { computeContestedTargets } from "./actions.ts";
 import { BUILTIN_ACTIONS, OVERRIDABLE_BUILTINS } from "./invoke.ts";
 import { HELP_SYSTEM } from "./help-content.ts";
+import { computeSalience } from "./salience.ts";
 
 // ── ContextRequest ──
 
@@ -107,13 +110,16 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
       return { seq: r.sort_key, ...parsed };
     });
 
-    // Update last_seen_seq
+    // Update last_seen_seq in _agents scope
     if (auth.agentId && recentMessages.length > 0) {
       const maxSeq = Math.max(...recentMessages.map((m: any) => m.seq ?? 0));
       if (maxSeq > 0) {
         sqlite.execute({
-          sql: `UPDATE agents SET last_seen_seq = MAX(last_seen_seq, ?) WHERE id = ? AND room_id = ?`,
-          args: [maxSeq, auth.agentId, roomId],
+          sql: `UPDATE state SET
+                  value = json_set(value, '$.last_seen_seq', ?),
+                  revision = revision + 1, updated_at = datetime('now')
+                WHERE room_id = ? AND scope = '_agents' AND key = ?`,
+          args: [maxSeq, roomId, auth.agentId],
         }).catch(() => {});
       }
     }
@@ -154,11 +160,12 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
   let actionsSection: Record<string, any> | undefined;
 
   if (includeActions) {
-    const actionResult = await sqlite.execute({
-      sql: `SELECT * FROM actions WHERE room_id = ? ORDER BY created_at`, args: [roomId],
+    // v8: Read action definitions from _actions scope in state table
+    const actionScopeResult = await sqlite.execute({
+      sql: `SELECT key, value FROM state WHERE room_id = ? AND scope = '_actions'`,
+      args: [roomId],
     });
-    let actionRows = rows2objects(actionResult);
-    actionRows = actionRows.filter((row: any) => isTimerLive(row));
+    const actionEntries = rows2objects(actionScopeResult) as any[];
 
     // Invocation counts for "usage" depth
     let invocationCounts: Record<string, number> = {};
@@ -169,7 +176,7 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
       });
       for (const row of rows2objects(auditResult)) {
         try {
-          const entry = JSON.parse(row.value);
+          const entry = JSON.parse((row as any).value);
           if (entry.action && !entry.builtin) {
             invocationCounts[entry.action] = (invocationCounts[entry.action] ?? 0) + 1;
           }
@@ -178,38 +185,39 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
     }
 
     actionsSection = {};
-    for (const row of actionRows) {
-      if (row.enabled_expr) {
-        try { if (!evaluate(row.enabled_expr, ctx)) continue; } catch { continue; }
+    for (const row of actionEntries) {
+      let def: any;
+      try { def = typeof row.value === "string" ? JSON.parse(row.value) : row.value; } catch { continue; }
+      const id = row.key;
+
+      // Check enabled
+      if (def.enabled) {
+        try { if (!evaluate(def.enabled, ctx)) continue; } catch { continue; }
       }
 
       // lean: just available + description
       const entry: any = {
         available: true,
-        description: row.description ?? null,
+        description: def.description ?? null,
       };
 
-      if (row.if_expr) {
-        try { entry.available = !!evaluate(row.if_expr, ctx); } catch { entry.available = false; }
+      if (def.if) {
+        try { entry.available = !!evaluate(def.if, ctx); } catch { entry.available = false; }
       }
 
       if (depth === "full" || depth === "usage") {
         entry.enabled = true;
-        if (row.params_json) {
-          try { entry.params = JSON.parse(row.params_json); } catch {}
-        }
-        if (row.writes_json) {
-          try { const w = JSON.parse(row.writes_json); if (w.length > 0) entry.writes = w; } catch {}
-        }
-        if (row.if_expr) entry.if = row.if_expr;
-        if (row.scope && row.scope !== "_shared") entry.scope = row.scope;
+        if (def.params) entry.params = def.params;
+        if (def.writes?.length > 0) entry.writes = def.writes;
+        if (def.if) entry.if = def.if;
+        if (def.scope && def.scope !== "_shared") entry.scope = def.scope;
       }
 
       if (depth === "usage") {
-        entry.invocation_count = invocationCounts[row.id] ?? 0;
+        entry.invocation_count = invocationCounts[id] ?? 0;
       }
 
-      actionsSection[row.id] = entry;
+      actionsSection[id] = entry;
     }
 
     // Add built-in actions (skip overridable ones that have a custom registration)
@@ -265,8 +273,6 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
   }
 
   // ---- _contested synthetic view ----
-  // Computed from action write targets — any (scope:key) targeted by 2+ actions.
-  // Injected as a system view so agents can gate on it and wait for it.
   const contestedTargets = await computeContestedTargets(roomId);
   const hasContested = Object.keys(contestedTargets).length > 0;
   if (hasContested) {
@@ -278,6 +284,35 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
         system: true,
       },
     };
+  }
+
+  // ---- v8: _salience synthetic view (agent-specific) ----
+  if (auth.authenticated && auth.agentId) {
+    try {
+      const salienceMap = await computeSalience(roomId, auth.agentId, {
+        contestedTargets,
+        limit: 20,
+      });
+      // Inject as a lightweight summary — full map available at /salience endpoint
+      const topKeys = salienceMap.entries.slice(0, 10).map(e => ({
+        key: `${e.scope}.${e.key}`,
+        score: Math.round(e.score * 100) / 100,
+        why: Object.entries(e.signals)
+          .filter(([_, v]) => v > 0.1)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k]) => k),
+      }));
+      if (topKeys.length > 0) {
+        result.views = {
+          ...result.views,
+          _salience: {
+            value: topKeys,
+            description: "Top salient state keys for this agent. Score = weighted sum of recency, dependency, authorship, directed, contest, delta signals. Full map at GET /salience.",
+            system: true,
+          },
+        };
+      }
+    } catch { /* salience is best-effort */ }
   }
 
   // ---- _context envelope ----
@@ -333,122 +368,6 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
   };
 
   return result;
-}
-
-// ── Dashboard poll ──
-
-/** Single-request bundle for dashboard polling. Returns all data sets in one response. */
-export async function dashboardPoll(roomId: string, url: URL, auth: AuthResult) {
-  const messagesLimit = Math.min(parseInt(url.searchParams.get("messages_limit") ?? "500"), 2000);
-  const auditLimit = Math.min(parseInt(url.searchParams.get("audit_limit") ?? "500"), 2000);
-
-  // Run all queries concurrently — same logic as the individual endpoints
-  const [agentsRes, stateRes, msgsRes, actionsRes, viewsRes, auditRes] = await Promise.all([
-    // Agents
-    sqlite.execute({ sql: `SELECT * FROM agents WHERE room_id = ? ORDER BY joined_at`, args: [roomId] }),
-    // State (respects scope privacy, excludes _messages and _audit which have dedicated sections)
-    (async () => {
-      let sql = `SELECT * FROM state WHERE room_id = ? AND scope != '_messages' AND scope != '_audit'`;
-      const args: any[] = [roomId];
-      if (hasFullReadAccess(auth)) {
-        // admin or view token: everything
-      } else if (auth.authenticated && auth.kind === "agent") {
-        const accessibleScopes = [auth.agentId!, ...auth.grants].filter(Boolean);
-        const conditions = [`scope LIKE '\\_%' ESCAPE '\\'`];
-        for (const s of accessibleScopes) { conditions.push(`scope = ?`); args.push(s); }
-        sql += ` AND (${conditions.join(" OR ")})`;
-      } else {
-        sql += ` AND scope LIKE '\\_%' ESCAPE '\\'`;
-      }
-      sql += ` ORDER BY CASE WHEN sort_key IS NOT NULL THEN sort_key ELSE 0 END ASC LIMIT 500`;
-      return sqlite.execute({ sql, args });
-    })(),
-    // Messages
-    sqlite.execute({
-      sql: `SELECT * FROM state WHERE room_id = ? AND scope = '_messages' ORDER BY sort_key ASC LIMIT ?`,
-      args: [roomId, messagesLimit],
-    }),
-    // Actions
-    sqlite.execute({ sql: `SELECT * FROM actions WHERE room_id = ? ORDER BY created_at`, args: [roomId] }),
-    // Views
-    sqlite.execute({ sql: `SELECT * FROM views WHERE room_id = ? ORDER BY created_at`, args: [roomId] }),
-    // Audit
-    sqlite.execute({
-      sql: `SELECT * FROM state WHERE room_id = ? AND scope = '_audit' ORDER BY sort_key ASC LIMIT ?`,
-      args: [roomId, auditLimit],
-    }),
-  ]);
-
-  // Process agents
-  const agents = rows2objects(agentsRes).map((a: any) => { delete a.token_hash; return a; });
-
-  // Process state with timer/enabled filtering
-  const ctx = await buildContext(roomId, { selfAgent: auth.agentId ?? undefined });
-  let stateRows = rows2objects(stateRes);
-  stateRows = stateRows.filter((row: any) => {
-    if (!isTimerLive(row)) return false;
-    if (row.enabled_expr) {
-      try { return !!evaluate(row.enabled_expr, ctx); } catch { return false; }
-    }
-    return true;
-  }).map((row: any) => {
-    try { return { ...row, value: JSON.parse(row.value) }; } catch { return row; }
-  });
-
-  // Process messages
-  let msgs = rows2objects(msgsRes);
-  msgs = msgs.filter((row: any) => isTimerLive(row)).map((row: any) => {
-    try { return { ...row, value: JSON.parse(row.value) }; } catch { return row; }
-  });
-
-  // Process actions
-  let actionRows = rows2objects(actionsRes);
-  actionRows = actionRows.filter((row: any) => isTimerLive(row));
-  actionRows = actionRows.filter((row: any) => {
-    if (!row.enabled_expr) return true;
-    try { return !!evaluate(row.enabled_expr, ctx); } catch { return false; }
-  });
-  const actions = actionRows.map((row: any) => {
-    const action = formatAction(row);
-    if (row.if_expr) {
-      try { action.available = !!evaluate(row.if_expr, ctx); } catch { action.available = false; }
-    } else { action.available = true; }
-    return action;
-  });
-
-  // Process views
-  let viewRows = rows2objects(viewsRes);
-  viewRows = viewRows.filter((row: any) => isTimerLive(row));
-  const views: any[] = [];
-  for (const row of viewRows) {
-    if (row.enabled_expr) {
-      try { if (!evaluate(row.enabled_expr, ctx)) continue; } catch { continue; }
-    }
-    const viewCtx = await buildViewContext(roomId, row.scope, ctx);
-    let value: any = null;
-    try {
-      const evalResult = evaluate(row.expr, viewCtx);
-      value = typeof evalResult === "bigint" ? Number(evalResult) : evalResult;
-    } catch (e: any) { value = { _error: e.message }; }
-    views.push({
-      id: row.id, room_id: row.room_id, scope: row.scope, description: row.description,
-      expr: row.expr, enabled: row.enabled_expr, registered_by: row.registered_by,
-      version: row.version, created_at: row.created_at, value,
-      render: row.render_json ? (() => { try { return JSON.parse(row.render_json); } catch { return null; } })() : null,
-    });
-  }
-
-  // Process audit
-  let auditRows = rows2objects(auditRes);
-  auditRows = auditRows.map((row: any) => {
-    try { return { ...row, value: JSON.parse(row.value) }; } catch { return row; }
-  });
-
-  // Compute _contested synthetic view
-  const contestedTargets = await computeContestedTargets(roomId);
-
-  return json({ agents, state: stateRows, messages: msgs, actions, views, audit: auditRows,
-    ...(Object.keys(contestedTargets).length > 0 ? { _contested: contestedTargets } : {}) });
 }
 
 // ── CEL eval endpoint ──

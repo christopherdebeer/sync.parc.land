@@ -8,12 +8,21 @@ import { ReplayWidget } from "./Replay.tsx";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+export interface DemoEntry {
+  id: string;
+  label: string;
+  room: string;
+  token: string;
+  description?: string;
+}
+
 export interface LandingData {
   version: string;
   tagline: string;
   intro: string;
   demo_room: string;
   demo_token: string;
+  demos: DemoEntry[];
   /** Pre-rendered HTML body (server-side via npm:marked) */
   bodyHtml: string;
   /** Pre-rendered HTML for each getting_started tab */
@@ -29,6 +38,7 @@ export const DEFAULT_DATA: LandingData = {
   intro: "sync is a coordination substrate for multi-agent systems.",
   demo_room: "",
   demo_token: "",
+  demos: [],
   bodyHtml: "",
   tabHtml: {},
   tabKeys: [],
@@ -89,11 +99,34 @@ export function parseLandingMd(raw: string, renderMd: (md: string) => string): L
     } catch {}
   }
 
+  // ```demos JSON block — array of { id, label, room, token, description? }
+  const demosMatch = raw.match(/```demos\r?\n([\s\S]*?)\n```/);
+  if (demosMatch) {
+    try {
+      const raw_demos = JSON.parse(demosMatch[1].trim());
+      if (Array.isArray(raw_demos)) {
+        data.demos = raw_demos.filter((d: any) => d.room && d.token).map((d: any) => ({
+          id: d.id || d.room,
+          label: d.label || d.room,
+          room: d.room,
+          token: d.token,
+          description: d.description,
+        }));
+      }
+    } catch {}
+  }
+
+  // Backward compat: if no demos block but demo_room/demo_token exist, synthesize single entry
+  if (data.demos.length === 0 && data.demo_room && data.demo_token) {
+    data.demos = [{ id: data.demo_room, label: data.demo_room, room: data.demo_room, token: data.demo_token }];
+  }
+
   // Body markdown — strip frontmatter + fenced blocks, render
   let body = raw;
   body = body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
   body = body.replace(/```getting_started\r?\n[\s\S]*?\n```\r?\n?/g, "");
   body = body.replace(/```prompts\r?\n[\s\S]*?\n```\r?\n?/g, "");
+  body = body.replace(/```demos\r?\n[\s\S]*?\n```\r?\n?/g, "");
   body = body.trim();
   data.bodyHtml = body ? renderMd(body) : "";
 
@@ -219,6 +252,30 @@ const ReplayLabel = styled.div`
   color: var(--dim); opacity: 0.5;
 `;
 
+const DemoSelector = styled.div`
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+  flex-wrap: wrap;
+`;
+
+const DemoPill = styled.button<{ $active: boolean }>`
+  background: ${p => p.$active ? "rgba(88,166,255,0.12)" : "transparent"};
+  border: 1px solid ${p => p.$active ? "var(--accent)" : "var(--border)"};
+  border-radius: 100px;
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: ${p => p.$active ? "600" : "400"};
+  color: ${p => p.$active ? "var(--accent)" : "var(--dim)"};
+  transition: all 0.15s;
+  white-space: nowrap;
+  line-height: 1.3;
+  &:hover { color: var(--fg); border-color: var(--dim); }
+  @media (max-width: 480px) { padding: 0.25rem 0.6rem; font-size: 0.72rem; }
+`;
+
 const TabBar = styled.div`
   display: flex; border-bottom: 1px solid var(--border);
 `;
@@ -299,6 +356,10 @@ interface LandingProps {
 
 export function Landing({ data = DEFAULT_DATA }: LandingProps) {
   const [activeTab, setActiveTab] = useState(data.tabKeys[0] ?? "mcp");
+  const [activeDemo, setActiveDemo] = useState(0);
+
+  const demos = data.demos;
+  const currentDemo = demos[activeDemo] ?? null;
 
   // Run mermaid once on mount if bodyHtml has mermaid blocks
   useEffect(() => {
@@ -329,11 +390,20 @@ export function Landing({ data = DEFAULT_DATA }: LandingProps) {
         <Section>
           <H2>See it in action</H2>
           <SectionIntro>A recorded run of a real room, replayed live from the audit log.</SectionIntro>
-          {data.demo_room && data.demo_token
-            ? <ReplayWidget roomId={data.demo_room} viewToken={data.demo_token} height={420} />
+          {demos.length > 1 && (
+            <DemoSelector>
+              {demos.map((d, i) => (
+                <DemoPill key={d.id} $active={activeDemo === i} onClick={() => setActiveDemo(i)}>
+                  {d.label}
+                </DemoPill>
+              ))}
+            </DemoSelector>
+          )}
+          {currentDemo
+            ? <ReplayWidget key={currentDemo.id} roomId={currentDemo.room} viewToken={currentDemo.token} height={420} />
             : <ReplayPlaceholder>
                 <ReplayLabel>replay widget</ReplayLabel>
-                <span style={{ opacity: 0.4, fontSize: "0.8rem" }}>configure demo_room + demo_token in landing.md</span>
+                <span style={{ opacity: 0.4, fontSize: "0.8rem" }}>configure demos in landing.md</span>
               </ReplayPlaceholder>
           }
         </Section>

@@ -169,29 +169,16 @@ export async function tickLogicalTimers(roomId: string, scope: string, key: stri
   const fullPath = `state.${scope}.${key}`;
   const shortPath = `${scope}.${key}`;
 
-  // Tick state timers
+  // Tick state timers (covers all state entries including _actions, _views scopes)
   await sqlite.execute({
     sql: `UPDATE state SET timer_ticks_left = timer_ticks_left - 1
           WHERE room_id = ? AND timer_tick_on IS NOT NULL AND timer_ticks_left > 0
           AND (timer_tick_on = ? OR timer_tick_on = ?)`,
     args: [roomId, fullPath, shortPath],
   });
-
-  // Tick action timers
-  await sqlite.execute({
-    sql: `UPDATE actions SET timer_ticks_left = timer_ticks_left - 1
-          WHERE room_id = ? AND timer_tick_on IS NOT NULL AND timer_ticks_left > 0
-          AND (timer_tick_on = ? OR timer_tick_on = ?)`,
-    args: [roomId, fullPath, shortPath],
-  });
-
-  // Tick view timers
-  await sqlite.execute({
-    sql: `UPDATE views SET timer_ticks_left = timer_ticks_left - 1
-          WHERE room_id = ? AND timer_tick_on IS NOT NULL AND timer_ticks_left > 0
-          AND (timer_tick_on = ? OR timer_tick_on = ?)`,
-    args: [roomId, fullPath, shortPath],
-  });
+  // Note: action/view timers in v8 use the _timer field inside their JSON value,
+  // managed by invoke.ts on_invoke cooldown. Logical-clock ticking for action/view
+  // timers would need read-modify-write on the JSON value if ever used.
 }
 
 // ============ Timer renewal ============

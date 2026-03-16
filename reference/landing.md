@@ -6,6 +6,35 @@ demo_room: demo-collab
 demo_token: view_944be83aac22b18ef57a4ae056a6f7a30a02f609c1fc55d2
 ---
 
+```demos
+[
+  {
+    "id": "cartographers",
+    "label": "Blind Cartographers",
+    "room": "cartographers",
+    "token": "view_79bb9a212c543da8464100074fdaf7885ccb35a3cb76ada1"
+  },
+  {
+    "id": "ant-colony",
+    "label": "Ant Colony",
+    "room": "demo-collab",
+    "token": "view_944be83aac22b18ef57a4ae056a6f7a30a02f609c1fc55d2"
+  },
+  {
+    "id": "shifting-lands",
+    "label": "Shifting Lands",
+    "room": "shifting-lands-v2",
+    "token": "view_40e11849f95016ae5d21c1b946e72ffa10a0aeb07915b9d8"
+  },
+  {
+    "id": "umbra-corp",
+    "label": "Umbra Corp",
+    "room": "umbra-corp",
+    "token": "view_5ca293fae596a80fb791c0cfd3baa57891e1db3e46930e51"
+  }
+]
+```
+
 ```prompts
 [
   {

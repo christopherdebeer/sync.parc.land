@@ -1,19 +1,19 @@
 import { sqlite } from "https://esm.town/v/std/sqlite";
 
 /**
- * v6 unified schema.
+ * Schema migration chain.
  *
- * Core tables: rooms, agents, state, actions, views.
- * State is the substrate — messages, agent presence, shared state are all scopes in one table.
- * Actions are write capabilities. Views are read capabilities.
- * Auth: room tokens for admin, agent tokens for identity, scope grants for privileges.
+ * v8: Two primitives — state + log. All domain entities (actions, views, agents)
+ * live in state table scopes (_actions, _views, _agents). Legacy entity tables
+ * (actions, views, agents) are created for backward compat with existing installs,
+ * then dropped after v8 migration runs.
  *
- * v6 changes:
- * - state.revision: sequential integer counter (ordinality). state.version becomes a
- *   content hash (unforgeable proof-of-read for if_version writes).
- * - views.render_json: optional render hint that collapses surfaces into views.
- *   A view with render_json is a surface. Dashboard queries views WHERE render_json IS NOT NULL.
- * - messages: `to` field is stored in the JSON value body, no schema change needed.
+ * Core tables that remain:
+ *   rooms    — room identity + admin/view token hashes
+ *   state    — the substrate (all scopes: _shared, _actions, _views, _agents, _messages, _audit, ...)
+ *   tokens   — unified credential store (room tokens, agent tokens, MCP tokens)
+ *   smcp_*   — MCP auth infrastructure (users, credentials, sessions, etc.)
+ *   log_index — temporal query index over state audit entries
  */
 
 export async function migrate() {
@@ -206,8 +206,9 @@ export async function migrate() {
   await addColumn("views", "render_json", "TEXT");
 
   // ============ MCP auth tables (smcp_ prefix) ============
-  // These support the OAuth 2.1 + WebAuthn authentication layer
-  // that sync-mcp provides for MCP clients.
+  // v7: Only tables still actively needed. Deprecated tables (smcp_access_tokens,
+  // smcp_refresh_tokens, smcp_vault, smcp_user_sessions) are no longer created.
+  // They still exist in production for backward compat with active sessions.
   await sqlite.batch([
     { sql: `CREATE TABLE IF NOT EXISTS smcp_users (
       id TEXT PRIMARY KEY,
@@ -252,32 +253,6 @@ export async function migrate() {
       expires_at TEXT NOT NULL,
       used INTEGER DEFAULT 0
     )`, args: [] },
-    { sql: `CREATE TABLE IF NOT EXISTS smcp_access_tokens (
-      token TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      client_id TEXT NOT NULL,
-      scope TEXT,
-      expires_at TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )`, args: [] },
-    { sql: `CREATE TABLE IF NOT EXISTS smcp_refresh_tokens (
-      token TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      client_id TEXT NOT NULL,
-      scope TEXT,
-      expires_at TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )`, args: [] },
-    { sql: `CREATE TABLE IF NOT EXISTS smcp_vault (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES smcp_users(id),
-      room_id TEXT NOT NULL,
-      token TEXT NOT NULL,
-      token_type TEXT NOT NULL,
-      label TEXT,
-      is_default INTEGER DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )`, args: [] },
     { sql: `CREATE TABLE IF NOT EXISTS smcp_sessions (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -312,14 +287,6 @@ export async function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (user_id, room_id)
     )`, args: [] },
-    { sql: `CREATE TABLE IF NOT EXISTS smcp_user_sessions (
-      token_hash TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES smcp_users(id),
-      client_id TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      expires_at TEXT NOT NULL
-    )`, args: [] },
     { sql: `CREATE TABLE IF NOT EXISTS smcp_embodiments (
       session_hash TEXT NOT NULL,
       room_id TEXT NOT NULL,
@@ -334,6 +301,37 @@ export async function migrate() {
     `CREATE INDEX IF NOT EXISTS idx_smcp_embodiments_session ON smcp_embodiments(session_hash)`,
   ];
   for (const sql of agencyIndexes) {
+    try { await sqlite.execute({ sql, args: [] }); } catch (_) {}
+  }
+
+  // ============ v8: log_index + backfill ============
+  const { migrateV8 } = await import("./schema-v8.ts");
+  await migrateV8();
+
+  // ============ v8: tokens.last_used_at ============
+  await addColumn("tokens", "last_used_at", "TEXT");
+
+  // ============ v8: Drop legacy entity tables ============
+  // All domain data migrated to state table scopes (_actions, _views, _agents).
+  // Agent tokens migrated to unified tokens table.
+  // These tables are no longer read or written by any code path.
+  const legacyDrops = [
+    `DROP TABLE IF EXISTS views`,
+    `DROP TABLE IF EXISTS actions`,
+    `DROP TABLE IF EXISTS agents`,
+  ];
+  for (const sql of legacyDrops) {
+    try { await sqlite.execute({ sql, args: [] }); } catch (_) {}
+  }
+
+  // Drop orphaned indexes on dropped tables
+  const legacyIndexDrops = [
+    `DROP INDEX IF EXISTS idx_actions_room`,
+    `DROP INDEX IF EXISTS idx_actions_tick_on`,
+    `DROP INDEX IF EXISTS idx_views_room`,
+    `DROP INDEX IF EXISTS idx_agents_room`,
+  ];
+  for (const sql of legacyIndexDrops) {
     try { await sqlite.execute({ sql, args: [] }); } catch (_) {}
   }
 

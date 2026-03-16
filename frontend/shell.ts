@@ -114,6 +114,8 @@ ${meta}
 </script>
 ${css}
 ${headScripts}
+<script src="https://cdn.jsdelivr.net/npm/eruda"></script>
+<script>if(typeof eruda!=='undefined')eruda.init();</script>
 </head>
 <body>
 <div id="root">${html}</div>

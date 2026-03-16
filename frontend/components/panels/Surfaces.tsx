@@ -1,5 +1,5 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
-import { useState, useCallback, useMemo } from "https://esm.sh/react@18.2.0";
+import { useState, useCallback, useMemo, useEffect, useRef } from "https://esm.sh/react@18.2.0";
 import { styled, keyframes } from "../../styled.ts";
 import { JsonView } from "../JsonView.tsx";
 import { aname, rel, tryParseJson } from "../../utils.ts";
@@ -8,8 +8,41 @@ import type {
   Surface, SurfaceMetric, SurfaceViewGrid, SurfaceViewTable, SurfaceArrayTable,
   SurfaceActionBar, SurfaceActionForm, SurfaceActionChoice,
   SurfaceFeed, SurfaceWatch, SurfaceSection, SurfaceMarkdown,
-  Action, View, RawMessage, StateRow, Agent, PollData,
 } from "../../types.ts";
+
+// ── Minimal interfaces for surface data (decoupled from PollData) ───────────
+
+/** What surfaces need from a view: id, resolved value, description, render hint */
+interface SurfaceView {
+  id: string;
+  value: any;
+  description?: string;
+  render?: any;
+}
+
+/** What surfaces need from an action: id, availability, params for invocation */
+interface SurfaceAction {
+  id: string;
+  available: boolean;
+  description?: string;
+  params?: Record<string, { type?: string; description?: string; enum?: any[] }>;
+  writes?: any[];
+  if?: string;
+}
+
+/** What surfaces need from a message */
+interface SurfaceMessage {
+  sort_key: number;
+  value: any;
+  updated_at: string;
+}
+
+/** What surfaces need from state: scope + key + value for watch surfaces */
+interface SurfaceStateEntry {
+  scope: string;
+  key: string;
+  value: any;
+}
 
 // ── Shared styles ───────────────────────────────────────────────────────────
 
@@ -59,7 +92,7 @@ const MetricValue = styled.div`
 
 const MetricError = styled.span`color: var(--red); font-size: 13px;`;
 
-function MetricSurface({ surface, views }: { surface: SurfaceMetric; views: View[] }) {
+function MetricSurface({ surface, views }: { surface: SurfaceMetric; views: SurfaceView[] }) {
   const view = views.find(v => v.id === surface.view);
   if (!view) return null;
 
@@ -108,9 +141,9 @@ const VGridValue = styled.div`
   word-break: break-word;
 `;
 
-function ViewGridSurface({ surface, views }: { surface: SurfaceViewGrid; views: View[] }) {
+function ViewGridSurface({ surface, views }: { surface: SurfaceViewGrid; views: SurfaceView[] }) {
   const viewMap = new Map(views.map(v => [v.id, v]));
-  const resolved = surface.views.map(id => viewMap.get(id)).filter((v): v is View => !!v);
+  const resolved = surface.views.map(id => viewMap.get(id)).filter((v): v is SurfaceView => !!v);
   if (!resolved.length) return null;
 
   return (
@@ -159,9 +192,9 @@ const VTRow = styled.div`
 const VTLabel = styled.div`color: var(--dim); font-size: 11px;`;
 const VTValue = styled.div`color: var(--fg); font-weight: 500; word-break: break-word;`;
 
-function ViewTableSurface({ surface, views }: { surface: SurfaceViewTable; views: View[] }) {
+function ViewTableSurface({ surface, views }: { surface: SurfaceViewTable; views: SurfaceView[] }) {
   const viewMap = new Map(views.map(v => [v.id, v]));
-  const resolved = surface.views.map(id => viewMap.get(id)).filter((v): v is View => !!v);
+  const resolved = surface.views.map(id => viewMap.get(id)).filter((v): v is SurfaceView => !!v);
   if (!resolved.length) return null;
 
   return (
@@ -282,20 +315,20 @@ const ABarDesc = styled.div`
 
 function ActionBarSurface({ surface, actions, roomId, baseUrl, authHeaders }: {
   surface: SurfaceActionBar;
-  actions: Action[];
+  actions: SurfaceAction[];
   roomId: string;
   baseUrl: string;
   authHeaders: () => Record<string, string>;
 }) {
   const actionMap = new Map(actions.map(a => [a.id, a]));
-  const resolved = surface.actions.map(id => actionMap.get(id)).filter((a): a is Action => !!a && a.available !== false);
+  const resolved = surface.actions.map(id => actionMap.get(id)).filter((a): a is SurfaceAction => !!a && a.available !== false);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [params, setParams] = useState<Record<string, string>>({});
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const openForm = useCallback((action: Action) => {
+  const openForm = useCallback((action: SurfaceAction) => {
     if (expandedId === action.id) {
       setExpandedId(null);
       return;
@@ -310,7 +343,7 @@ function ActionBarSurface({ surface, actions, roomId, baseUrl, authHeaders }: {
     setExpandedId(action.id);
   }, [expandedId]);
 
-  const doInvoke = useCallback(async (action: Action) => {
+  const doInvoke = useCallback(async (action: SurfaceAction) => {
     setSending(true);
     setResult(null);
     try {
@@ -441,7 +474,7 @@ const AFormUnavail = styled.div`font-size: 11px; color: var(--dim); font-style: 
 
 function ActionFormSurface({ surface, actions, roomId, baseUrl, authHeaders }: {
   surface: SurfaceActionForm;
-  actions: Action[];
+  actions: SurfaceAction[];
   roomId: string;
   baseUrl: string;
   authHeaders: () => Record<string, string>;
@@ -578,17 +611,17 @@ const ChoiceDesc = styled.div`font-size: 10px; color: var(--dim); margin-top: 2p
 
 function ActionChoiceSurface({ surface, actions, roomId, baseUrl, authHeaders }: {
   surface: SurfaceActionChoice;
-  actions: Action[];
+  actions: SurfaceAction[];
   roomId: string;
   baseUrl: string;
   authHeaders: () => Record<string, string>;
 }) {
   const actionMap = new Map(actions.map(a => [a.id, a]));
-  const resolved = surface.actions.map(id => actionMap.get(id)).filter((a): a is Action => !!a);
+  const resolved = surface.actions.map(id => actionMap.get(id)).filter((a): a is SurfaceAction => !!a);
   const [sending, setSending] = useState<string | null>(null);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const invoke = useCallback(async (action: Action) => {
+  const invoke = useCallback(async (action: SurfaceAction) => {
     if (Object.keys(action.params || {}).length > 0) return; // Can't quick-invoke with params
     setSending(action.id);
     setResult(null);
@@ -687,13 +720,14 @@ const FeedSendBtn = styled.button`
   &:disabled { background: var(--border); color: var(--dim); cursor: not-allowed; }
 `;
 
-function FeedSurface({ surface, messages, agentMap, roomId, baseUrl, authHeaders }: {
+function FeedSurface({ surface, messages, agentMap, roomId, baseUrl, authHeaders, readOnly }: {
   surface: SurfaceFeed;
-  messages: RawMessage[];
-  agentMap: Record<string, Agent>;
+  messages: SurfaceMessage[];
+  agentMap: Record<string, { name: string }>;
   roomId: string;
   baseUrl: string;
   authHeaders: () => Record<string, string>;
+  readOnly?: boolean;
 }) {
   const filtered = useMemo(() => {
     if (!surface.kinds?.length) return messages;
@@ -749,7 +783,7 @@ function FeedSurface({ surface, messages, agentMap, roomId, baseUrl, authHeaders
             })}
           </FeedLog>
         )}
-        {surface.compose !== false && (
+        {!readOnly && surface.compose !== false && (
           <FeedCompose>
             <FeedInput
               type="text"
@@ -769,13 +803,45 @@ function FeedSurface({ surface, messages, agentMap, roomId, baseUrl, authHeaders
   );
 }
 
+// v8: Upgraded markdown rendering — uses marked.js (loaded in shell)
+// and detects mermaid code blocks for diagram rendering.
 function renderMarkdown(text: string): string {
   if (typeof (globalThis as any).marked !== "undefined") {
-    return (globalThis as any).marked.parse(text, { breaks: true, gfm: true });
+    try {
+      const html = (globalThis as any).marked.parse(text, { breaks: true, gfm: true });
+      return html;
+    } catch { /* fall through to fallback */ }
   }
+  // Fallback: basic escaping + line breaks
   const d = document.createElement("div");
   d.textContent = text;
   return d.innerHTML.replace(/\n/g, "<br>");
+}
+
+// v8: Detect and render mermaid diagrams in markdown content.
+// Called after mount on elements containing rendered markdown.
+function renderMermaidBlocks(container: HTMLElement | null) {
+  if (!container) return;
+  if (typeof (globalThis as any).mermaid === "undefined") return;
+  const codeBlocks = container.querySelectorAll("pre code.language-mermaid, pre code");
+  let idx = 0;
+  codeBlocks.forEach((block) => {
+    const text = block.textContent?.trim() ?? "";
+    // Detect mermaid syntax
+    const isMermaid = block.classList.contains("language-mermaid") ||
+      /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|journey)\b/.test(text);
+    if (!isMermaid) return;
+    const pre = block.parentElement;
+    if (!pre) return;
+    const wrapper = document.createElement("div");
+    wrapper.className = "mermaid";
+    wrapper.textContent = text;
+    pre.replaceWith(wrapper);
+    idx++;
+  });
+  if (idx > 0) {
+    try { (globalThis as any).mermaid.run({ querySelector: ".mermaid" }); } catch {}
+  }
 }
 
 // ── Watch (specific state keys) ─────────────────────────────────────────────
@@ -798,12 +864,12 @@ const WatchRow = styled.div`
 const WatchKey = styled.div`color: var(--green); font-weight: 500; word-break: break-word;`;
 const WatchValue = styled.div`color: var(--fg); word-break: break-word;`;
 
-function WatchSurface({ surface, state }: { surface: SurfaceWatch; state: StateRow[] }) {
+function WatchSurface({ surface, state }: { surface: SurfaceWatch; state: SurfaceStateEntry[] }) {
   const resolved = surface.keys.map((k: any) => {
     const scope = typeof k === "string" ? "_shared" : k.scope;
     const key = typeof k === "string" ? k : k.key;
     return state.find(s => s.scope === scope && s.key === key);
-  }).filter((s): s is StateRow => !!s);
+  }).filter((s): s is SurfaceStateEntry => !!s);
 
   if (!resolved.length) return null;
 
@@ -844,15 +910,22 @@ const MdCard = styled.div`
   p + p { margin-top: 0.4rem; }
 `;
 
-function MarkdownSurface({ surface, views }: { surface: SurfaceMarkdown; views: View[] }) {
+function MarkdownSurface({ surface, views }: { surface: SurfaceMarkdown; views: SurfaceView[] }) {
   const view = views.find(v => v.id === surface.view);
+  const mdRef = useRef<HTMLDivElement>(null);
   if (!view) return null;
   const text = typeof view.value === "string" ? view.value : JSON.stringify(view.value);
+  const html = useMemo(() => renderMarkdown(text), [text]);
+
+  // v8: Trigger mermaid rendering after markdown is inserted
+  useEffect(() => {
+    renderMermaidBlocks(mdRef.current);
+  }, [html]);
 
   return (
     <SurfaceWrap>
       {surface.label && <SurfaceLabel>{surface.label}</SurfaceLabel>}
-      <MdCard dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />
+      <MdCard ref={mdRef} dangerouslySetInnerHTML={{ __html: html }} />
     </SurfaceWrap>
   );
 }
@@ -945,7 +1018,7 @@ function renderCellValue(val: any, truncate: number): React.ReactNode {
   return <JsonView value={val} path="cell" />;
 }
 
-function ArrayTableSurface({ view }: { view: View }) {
+function ArrayTableSurface({ view }: { view: SurfaceView }) {
   const arr = Array.isArray(view.value) ? view.value : [];
   const render = view.render;
   const maxRows = render?.max_rows ?? 100;
@@ -1031,12 +1104,22 @@ function SectionSurface({ surface, ctx }: { surface: SurfaceSection; ctx: Surfac
 // ── Main renderer ───────────────────────────────────────────────────────────
 
 export interface SurfaceContext {
-  data: PollData;
-  agentMap: Record<string, Agent>;
+  /** Resolved views: id + value + description + render hint */
+  views: SurfaceView[];
+  /** Actions with availability resolved */
+  actions: SurfaceAction[];
+  /** Messages sorted by sort_key */
+  messages: SurfaceMessage[];
+  /** State entries for watch surfaces */
+  state: SurfaceStateEntry[];
+  /** Agent display names */
+  agentMap: Record<string, { name: string }>;
   roomId: string;
   baseUrl: string;
   authHeaders: () => Record<string, string>;
   evalCel: (expr: string) => boolean;
+  /** When true, hides action surfaces and feed compose (e.g. replay mode). */
+  readOnly?: boolean;
 }
 
 export function SurfaceRenderer({ surface, ctx }: { surface: Surface; ctx: SurfaceContext }) {
@@ -1045,29 +1128,32 @@ export function SurfaceRenderer({ surface, ctx }: { surface: Surface; ctx: Surfa
 
   switch (surface.type) {
     case "metric":
-      return <MetricSurface surface={surface} views={ctx.data.views} />;
+      return <MetricSurface surface={surface} views={ctx.views} />;
     case "view-grid":
-      return <ViewGridSurface surface={surface} views={ctx.data.views} />;
+      return <ViewGridSurface surface={surface} views={ctx.views} />;
     case "view-table":
-      return <ViewTableSurface surface={surface} views={ctx.data.views} />;
+      return <ViewTableSurface surface={surface} views={ctx.views} />;
     case "array-table": {
-      const view = ctx.data.views.find(v => v.id === (surface as SurfaceArrayTable).view);
+      const view = ctx.views.find(v => v.id === (surface as SurfaceArrayTable).view);
       return view ? <ArrayTableSurface view={{ ...view, render: { type: "array-table", label: surface.label, columns: (surface as SurfaceArrayTable).columns, max_rows: (surface as SurfaceArrayTable).max_rows } }} /> : null;
     }
     case "action-bar":
-      return <ActionBarSurface surface={surface} actions={ctx.data.actions} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} />;
+      if (ctx.readOnly) return null;
+      return <ActionBarSurface surface={surface} actions={ctx.actions} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} />;
     case "action-form":
-      return <ActionFormSurface surface={surface} actions={ctx.data.actions} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} />;
+      if (ctx.readOnly) return null;
+      return <ActionFormSurface surface={surface} actions={ctx.actions} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} />;
     case "action-choice":
-      return <ActionChoiceSurface surface={surface} actions={ctx.data.actions} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} />;
+      if (ctx.readOnly) return null;
+      return <ActionChoiceSurface surface={surface} actions={ctx.actions} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} />;
     case "feed":
-      return <FeedSurface surface={surface} messages={ctx.data.messages} agentMap={ctx.agentMap} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} />;
+      return <FeedSurface surface={surface} messages={ctx.messages} agentMap={ctx.agentMap} roomId={ctx.roomId} baseUrl={ctx.baseUrl} authHeaders={ctx.authHeaders} readOnly={ctx.readOnly} />;
     case "watch":
-      return <WatchSurface surface={surface} state={ctx.data.state} />;
+      return <WatchSurface surface={surface} state={ctx.state} />;
     case "section":
       return <SectionSurface surface={surface} ctx={ctx} />;
     case "markdown":
-      return <MarkdownSurface surface={surface} views={ctx.data.views} />;
+      return <MarkdownSurface surface={surface} views={ctx.views} />;
     default:
       return null;
   }

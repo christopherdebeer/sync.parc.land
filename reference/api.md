@@ -1,26 +1,134 @@
-# sync v6 API Reference
+# sync v7 API Reference
 
 Base URL: `https://sync.parc.land`
 
 ## Auth Model
 
-Three token types:
-- **Room token** (`room_...`): returned on room creation. Full admin (`*` scope authority, read + write).
-- **View token** (`view_...`): returned on room creation. Read-only access to all scopes (no mutations).
-- **Agent token** (`as_...`): returned on agent join. Own-scope authority + grants.
-- All mutations require `Authorization: Bearer <token>` header with a room or agent token.
-- View tokens are blocked from all mutations with `403 read_only_token`.
+**Unified tokens (v7):** All credentials are scoped tokens minted by a passkey-authenticated user. Token prefix: `tok_`. Scope string determines what the token can do.
 
-## Global Query Params
+**Legacy tokens:** `room_`, `view_`, `as_` prefix tokens continue to work for backward compatibility.
 
-- `compact=true` — strip null/empty fields from all JSON responses.
+**Effective access** = `min(token.scope, user_rooms.role)`. A token can only narrow, never widen.
+
+---
+
+## Device Auth (RFC 8628)
+
+### POST /auth/device
+Initiate device authorization. Returns a device code for CLI polling and a user code for browser approval.
+
+```json
+// Request
+{ "scope": "rooms:* create_rooms", "client_id": "my-cli" }
+
+// Response 200
+{
+  "device_code": "dev_xxx",
+  "user_code": "ABCD-1234",
+  "verification_uri": "https://sync.parc.land/auth/device",
+  "verification_uri_complete": "https://sync.parc.land/auth/device?code=ABCD-1234",
+  "expires_in": 900,
+  "interval": 5
+}
+```
+
+### GET /auth/device?code=ABCD-1234
+Browser approval page with WebAuthn passkey auth + consent UI (room picker, scope customization).
+
+### POST /auth/device/token
+CLI polls for token. Returns `authorization_pending` until user approves.
+
+```json
+// Request
+{ "device_code": "dev_xxx" }
+
+// Pending: 200 { "error": "authorization_pending" }
+// Denied:  403 { "error": "access_denied" }
+// Approved: 200
+{
+  "access_token": "tok_xxx",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "refresh_token": "ref_xxx",
+  "scope": "rooms:* create_rooms"
+}
+```
+
+---
+
+## Scope Elevation
+
+When a `tok_` token attempts to access a room not in its scope, the `403` response includes a stateless elevation URL:
+
+```json
+{
+  "error": "scope_denied",
+  "room": "kernel-ergonomics",
+  "elevate": "https://sync.parc.land/auth/elevate?token_id=xxx&room=kernel-ergonomics",
+  "hint": "Present the elevate URL to the user to request access, then retry."
+}
+```
+
+### GET /auth/elevate
+Browser elevation page. Shows the requested room, access level picker (full/write/read), passkey auth, and approve/deny.
+
+Query params: `token_id` (required), `room` (required), `level` (optional, default `full`).
+
+### POST /auth/elevate/approve
+Server-side endpoint called by the elevation page after passkey auth. Validates the user owns the token, has access to the room in `user_rooms`, and appends the scope. No new tables — the token's scope string is patched directly.
+
+The MCP path surfaces the same URL in error messages, enabling agents to present it to users conversationally.
+
+---
+
+## Token Management
+
+### POST /tokens
+Mint a scoped token. Requires authentication. Scope must not exceed the minting user's access.
+
+```json
+// Request
+{ "scope": "rooms:my-room:agent:alice", "label": "Alice delegation", "expires_in": 3600 }
+
+// Response 201
+{ "id": "...", "token": "tok_xxx", "scope": "...", "expires_at": "..." }
+```
+
+### GET /tokens
+List tokens minted by the authenticated user. Never exposes bearer strings.
+
+### PATCH /tokens/:id
+Update a token's scope or label. The new scope must not exceed the caller's actual access (user_rooms + authenticating token privileges). Both widening and narrowing are allowed within this bound.
+
+```json
+// Request — widen to add rooms
+{ "scope": "rooms:cartographers rooms:demo create_rooms", "label": "Updated" }
+
+// Response 200
+{ "id": "...", "scope": "rooms:cartographers rooms:demo create_rooms", "previous_scope": "rooms:cartographers:read", "label": "Updated" }
+```
+
+Returns `403 scope_exceeds_access` if the new scope includes rooms or privileges the caller doesn't have.
+
+**Room creation and scope:** When a `tok_` token with `create_rooms` scope creates a room, the system automatically appends `rooms:<new-id>` to that token's scope. This means the creating token (and only that token) gains access to the room. Other tokens from the same user do not — the scope string is the single source of truth.
+
+### DELETE /tokens/:id
+Revoke a token. Must be minted by the authenticated user.
+
+### POST /tokens/refresh
+Exchange a refresh token for a new access token.
+
+```json
+{ "refresh_token": "ref_xxx" }
+→ { "access_token": "tok_yyy", "refresh_token": "ref_yyy", "expires_in": 3600 }
+```
 
 ---
 
 ## Rooms
 
 ### POST /rooms
-Create a room. Returns room token for admin access.
+Create a room. If authenticated with a `tok_` token that has `create_rooms` scope, the room is auto-linked to your user as owner. Unauthenticated creation still works for backward compatibility.
 
 ```json
 // Request
@@ -36,17 +144,30 @@ List rooms visible to the authenticated token.
 ### GET /rooms/:id
 Get room info.
 
-### POST /rooms/:id/rotate-view-token
-**Requires room token.** Regenerate the view token, invalidating the previous one.
+### POST /rooms/:id/invite
+**Requires owner access.** Invite a user to a room.
 
 ```json
-// Response 200
-{ "ok": true, "view_token": "view_..." }
+{ "username": "bob", "role": "collaborator" }
+→ { "invited": true, "username": "bob", "room": "my-room", "role": "collaborator" }
 ```
 
+Roles: `owner`, `collaborator`, `participant`, `observer`.
+
+### POST /rooms/:id/claim
+Claim an orphaned room (no owners in user_rooms). Any authenticated user can claim rooms with no existing users.
+
+```json
+{ "label": "My Room" }
+→ { "claimed": true, "room": "my-room", "role": "owner" }
+```
+
+### POST /rooms/:id/rotate-view-token
+**Requires admin access.** Regenerate the view token.
+
 ### POST /rooms/:id/generate-view-token
-**Requires room token.** Generate a view token for rooms created before view tokens existed.
-Returns 409 if the room already has one — use `rotate-view-token` instead.
+**Requires admin access.** Generate a view token for rooms that don't have one.
+Returns 409 if one already exists.
 
 ---
 

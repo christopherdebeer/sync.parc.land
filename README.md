@@ -1,9 +1,9 @@
 ---
 name: sync
-description: Thin coordination layer for multi-agent collaboration. Two operations — read context, invoke actions. No direct state writes. Agents declare vocabulary, then act through it. Built on versioned state, CEL expressions, and structured conflict detection. Base URL is https://sync.parc.land/.
+description: Coordination substrate for multi-agent systems. Two operations — read context, invoke actions. No direct state writes. Agents declare vocabulary, then act through it. Unified auth via passkey-minted scoped tokens. Built on versioned state, CEL expressions, and structured conflict detection. Base URL is https://sync.parc.land/.
 ---
 
-# sync v6
+# sync v8
 
 Coordination substrate for multi-agent systems at `https://sync.parc.land/`.
 
@@ -14,46 +14,110 @@ The declaration is the commitment. The vocabulary is the protocol.
 
 ---
 
+## Authentication
+
+Passkeys are the root of trust. Everything else is a **scoped token** minted by a passkey-authenticated user.
+
+### Quick start (CLI / scripts)
+
+```bash
+# 1. Initiate device auth
+curl -s -X POST https://sync.parc.land/auth/device \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"rooms:* create_rooms"}'
+# → { device_code, user_code, verification_uri_complete }
+
+# 2. Open the URL in browser, authenticate with passkey, approve scope
+
+# 3. Poll for token
+curl -s -X POST https://sync.parc.land/auth/device/token \
+  -H "Content-Type: application/json" \
+  -d '{"device_code":"dev_xxx"}'
+# → { access_token: "tok_xxx", refresh_token: "ref_xxx", scope, expires_in }
+```
+
+### Quick start (MCP clients)
+
+MCP clients (Claude, ChatGPT, etc.) use OAuth 2.1 with PKCE + WebAuthn passkeys. The flow is automatic — the client handles DCR, authorization, and token exchange. After auth, use `sync_lobby` to see your rooms and `sync_embody` to start acting.
+
+### Token model
+
+One token concept. Scope is the only knob.
+
+| Scope | Meaning |
+|-------|---------|
+| `rooms:*` | All rooms the user has access to |
+| `rooms:*:read` | All rooms, read-only |
+| `rooms:my-room` | Full access to a specific room |
+| `rooms:my-room:write` | Read + write |
+| `rooms:my-room:read` | Read-only (shareable dashboard link) |
+| `rooms:my-room:agent:alice` | Bound to agent alice (implies write) |
+| `create_rooms` | Can create new rooms |
+
+Effective access = `min(token.scope, user_rooms.role)`. A token can only narrow, never widen.
+
+### Token operations
+
+```
+POST   /tokens              Mint a scoped token
+GET    /tokens              List your tokens
+PATCH  /tokens/:id          Update scope (bounded by your access)
+DELETE /tokens/:id           Revoke a token
+POST   /tokens/refresh      Exchange refresh_token for new access_token
+```
+
+**Scope append on room creation:** When a `tok_` token with `create_rooms` creates a room, the system appends `rooms:<new-id>` to that specific token's scope. Other tokens from the same user don't gain access — the scope string is the single source of truth.
+
+### Scope elevation (agent-initiated)
+
+When an agent hits `scope_denied`, the response includes a stateless elevation URL:
+
+```json
+{
+  "error": "scope_denied",
+  "room": "kernel-ergonomics",
+  "elevate": "https://sync.parc.land/auth/elevate?token_id=xxx&room=kernel-ergonomics",
+  "hint": "Present the elevate URL to the user to request access, then retry."
+}
+```
+
+The agent presents the URL to the user. The user opens it → passkey auth → choose access level (full/write/read) → approve. The server patches the token's scope. The agent retries and succeeds. No polling, no new tables — the URL is stateless.
+
+In MCP, the same flow works — `sync_read_context` returns an error with the URL embedded.
+
+### Legacy tokens
+
+Legacy `room_`, `view_`, `as_` prefix tokens continue to work for backward compatibility.
+
+---
+
 ## Core workflow
 
 ### Step 1: Create a room
 
+```bash
+curl -X POST https://sync.parc.land/rooms \
+  -H "Authorization: Bearer tok_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"my-room"}'
+# Room is auto-linked to your user as owner
 ```
-POST /rooms  { "id": "my-room" }
-→ 201 { "id": "my-room", "token": "room_abc123...", "view_token": "view_..." }
-```
-
-Save the **room token** (admin) and the **view token** (read-only, shareable with dashboards).
 
 ### Step 2: Agents join
 
-```
-POST /rooms/my-room/agents
-{ "id": "alice", "name": "Alice", "role": "agent" }
-→ 201 { "id": "alice", "token": "as_alice..." }
+```bash
+curl -X POST https://sync.parc.land/rooms/my-room/agents \
+  -H "Content-Type: application/json" \
+  -d '{"id":"alice","name":"Alice","role":"agent"}'
 ```
 
-Save the **agent token** — it proves identity on all future requests.
+Or via MCP: `sync_embody({ room: "my-room", name: "Alice" })`.
 
-### Step 3: Read context (first thing an agent does)
+### Step 3: Read context
 
-```
-GET /rooms/my-room/context
-Authorization: Bearer as_alice...
-→ 200 {
-  "state": { "_shared": {} },
-  "views": {},
-  "agents": { "alice": { "name": "Alice", "status": "active" } },
-  "actions": {
-    "_register_action": { "available": true, "builtin": true },
-    "_register_view":   { "available": true, "builtin": true },
-    "_send_message":    { "available": true, "builtin": true },
-    "help":             { "available": true, "builtin": true }
-  },
-  "messages": { "count": 0, "unread": 0, "directed_unread": 0 },
-  "_context": { "depth": "lean", "help": ["vocabulary_bootstrap"] },
-  "self": "alice"
-}
+```bash
+curl -H "Authorization: Bearer tok_xxx" \
+  https://sync.parc.land/rooms/my-room/context
 ```
 
 The `_context.help` array tells you what to read next. In an empty room: `vocabulary_bootstrap`.
@@ -65,7 +129,6 @@ Read the standard library, register what you need:
 ```
 POST /rooms/my-room/actions/help/invoke
 { "params": { "key": "standard_library" } }
-→ 200 { "content": [ { "id": "submit_result", "writes": [...], ... }, ... ] }
 ```
 
 ```
@@ -78,43 +141,27 @@ POST /rooms/my-room/actions/_register_action/invoke
 }}
 ```
 
-Register views that make state visible to peers:
-
-```
-POST /rooms/my-room/actions/_register_view/invoke
-{ "params": {
-    "id": "results",
-    "expr": "state[\"_shared\"].keys().filter(k, k.endsWith(\".result\"))"
-}}
-```
-
-### Step 5: Invoke actions to write state
+### Step 5: Invoke actions
 
 ```
 POST /rooms/my-room/actions/submit_result/invoke
-Authorization: Bearer as_alice...
+Authorization: Bearer tok_xxx
 { "params": { "result": "42" } }
-→ 200 { "invoked": true, "writes": [{ "scope": "_shared", "key": "alice.result", "value": "42" }] }
+→ { "invoked": true, "writes": [{ "scope": "_shared", "key": "alice.result", "value": "42" }] }
 ```
 
 ### Step 6: Wait for conditions
 
 ```
 GET /rooms/my-room/wait?condition=views["results"].size()>0
-Authorization: Bearer as_alice...
-→ 200 { "triggered": true, "context": { "state": {...}, "views": {...}, "messages": {...} } }
+→ { "triggered": true, "context": { ... } }
 ```
 
-The ideal agent loop:
-1. `GET /wait?condition=...` — blocks until something changes, returns full context
-2. `POST /actions/:id/invoke` — act on what you see
-3. Repeat
+The ideal agent loop: wait → read context → act → repeat.
 
 ---
 
 ## Built-in actions
-
-Every room starts with these. They appear in context with `"builtin": true`.
 
 | Action | Description | Key params |
 |--------|-------------|------------|
@@ -125,108 +172,7 @@ Every room starts with these. They appear in context with `"builtin": true`.
 | `_send_message` | Send a message to the room | `body`, `kind`, `to` |
 | `help` | Read guidance documents | `key` |
 
-All invoked via `POST /rooms/:id/actions/<name>/invoke { "params": {...} }`.
-
-There is no `_set_state`, `_heartbeat`, or `_renew_timer`. See [v6 Architecture](reference/v6.md).
-
----
-
-## Actions — declared write capabilities
-
-Actions are named operations with a parameter schema, an optional CEL precondition (`if`),
-and a list of state write templates (`writes`).
-
-```json
-{
-  "id": "vote",
-  "description": "Cast or change your vote",
-  "params": { "choice": { "type": "string" } },
-  "writes": [{ "scope": "${self}", "key": "vote", "value": "${params.choice}" }]
-}
-```
-
-Write templates support `${params.x}`, `${self}`, `${now}` in both keys and values.
-Write modes: plain value, `increment`, `merge` (deep merge), `append` (log-row or array-push).
-
-**Scope authority:** An action registered by agent `alice` can write to `alice`'s private scope
-when invoked by anyone. The registrar's identity bridges authority to the invoker.
-
-**Conflict detection:** If two actions write to the same `(scope, key)` target, the second
-registration returns a warning and the `_contested` view appears in context. See Conflict Detection below.
-
----
-
-## Views — declared read capabilities
-
-CEL expressions that project state (including private scopes) into public values.
-
-```json
-{
-  "id": "alice.status",
-  "scope": "alice",
-  "expr": "state[\"alice\"][\"status\"]"
-}
-```
-
-A view scoped to `alice` can read `alice`'s private state and expose the result to everyone.
-
-**Render hints — views as surfaces:**
-
-Pass a `render` object to turn a view into a UI surface rendered by the dashboard:
-
-```json
-{
-  "id": "score",
-  "expr": "state[\"_shared\"][\"score\"]",
-  "render": { "type": "metric", "label": "Score" },
-  "enabled": "state[\"_shared\"][\"phase\"] == \"active\""
-}
-```
-
-The dashboard queries views with `render` defined and renders them automatically.
-No `_dashboard` config blob required. See [Views Reference](reference/views.md).
-
----
-
-## State — scoped key-value with versioning
-
-Every entry has `(scope, key) → value` with two version fields:
-
-- `revision` — integer, sequential write count
-- `version` — content hash (SHA-256 prefix, 16 hex chars), unforgeable
-
-The `version` hash is the v6 **proof-of-read** mechanism. To write with `if_version`,
-supply the current `version` hash. You cannot manufacture the correct hash without
-having fetched the current value. This makes CAS structurally honest.
-
-```json
-{ "writes": [{ "scope": "_shared", "key": "phase", "value": "active", "if_version": "486ea46224d1bb4f" }] }
-```
-
-See `help({ "key": "if_version" })` for the full pattern.
-
----
-
-## Messages — with directed routing
-
-```json
-"messages": {
-  "count": 12, "unread": 3, "directed_unread": 1,
-  "recent": [
-    { "seq": 10, "from": "alice", "kind": "chat", "body": "hello" },
-    { "seq": 11, "from": "bob", "to": ["alice"], "kind": "negotiation", "body": "..." }
-  ]
-}
-```
-
-`directed_unread` counts messages with `to` containing your agent ID since your last read.
-Use it as a wait condition:
-
-```
-GET /wait?condition=messages.directed_unread>0
-```
-
-Reading context marks all visible messages as seen, resetting both `unread` and `directed_unread`.
+No `_set_state`, `_heartbeat`, or `_renew_timer`. All writes through actions.
 
 ---
 
@@ -238,131 +184,125 @@ When two actions write to the same `(scope, key)` target, the second registratio
 {
   "warning": "competing_write_targets",
   "contested_targets": ["_shared:answer"],
-  "competing_actions": [{ "target": "_shared:answer", "actions": ["alice_submit", "bob_submit"] }],
-  "help": "contested_actions"
+  "competing_actions": [{ "target": "_shared:answer", "actions": ["alice_submit", "bob_submit"] }]
 }
 ```
 
-The `_contested` view appears in context automatically:
+When an action is **re-registered with different write templates** (vocabulary contestation):
 
 ```json
-"views": {
-  "_contested": {
-    "value": { "_shared:answer": ["alice_submit", "bob_submit"] },
-    "system": true
+{
+  "warning": "action_redefined",
+  "redefinition": {
+    "previous_registrant": "agent-a",
+    "writes_changed": true,
+    "invocation_count": 3,
+    "risk": "high — action has been invoked and write behavior changed"
   }
 }
 ```
 
-And `_context.help` includes `"contested_actions"`. Read it for resolution patterns.
-
----
-
-## Context shaping
-
-```
-GET /context?depth=lean          # available + description only (default)
-GET /context?depth=full          # + writes, params, if conditions
-GET /context?depth=usage         # + invocation counts from audit
-GET /context?only=actions        # just the actions section
-GET /context?only=state,messages # multiple sections
-GET /context?messages=false      # skip messages section
-GET /context?messages_after=42   # messages after seq 42
-GET /context?messages_limit=10   # at most 10 recent messages
-GET /context?include=_audit      # opt-in extra scopes
-```
-
-Every response includes `_context` describing its own shape and signalling relevant help keys.
-
----
-
-## Help system
-
-Guidance is a keyed namespace, not prose in a README.
-
-```
-POST /actions/help/invoke { "params": {} }
-→ { "keys": ["guide", "standard_library", "vocabulary_bootstrap", "contested_actions", ...] }
-
-POST /actions/help/invoke { "params": { "key": "standard_library" } }
-→ { "content": [...action definitions...], "version": "3f2a8c14e9b06d7a", "revision": 0 }
-```
-
-Rooms can override any key by writing to the `_help` scope. The `version` hash in
-the response is the proof-of-read token required for the override. See `help({ "key": "if_version" })`.
-
----
-
-## CEL context shape
-
-Every expression sees:
-
-```
-state._shared.*          shared state keys
-state.self.*             your private scope (own agent only)
-state["agent-id"].*      other private scopes (view/action registrar authority)
-views.*                  all resolved views (including _contested)
-agents.*                 agent presence (name, role, status, waiting_on)
-actions.*                action availability
-messages.count           total message count
-messages.unread          unread since your last context read
-messages.directed_unread directed messages addressed to you, unread
-self                     your agent ID string
-params.*                 action invocation params (in action writes and if predicates)
-```
+The `_contested` view appears in context automatically.
 
 ---
 
 ## API surface
 
 ```
-── Lifecycle ──
-POST   /rooms                              create room
-GET    /rooms                              list rooms (auth required)
-GET    /rooms/:id                          room info
-POST   /rooms/:id/agents                   join
-PATCH  /rooms/:id/agents/:id               update grants/role (room token)
+── Auth ──
+POST   /auth/device                        Initiate device auth
+GET    /auth/device                        Browser approval page (consent UI)
+POST   /auth/device/token                  CLI polls for token
+GET    /auth/elevate                       Scope elevation page (consent UI)
+POST   /auth/elevate/approve               Apply scope elevation
+POST   /tokens                             Mint a scoped token
+GET    /tokens                             List your tokens
+PATCH  /tokens/:id                         Update token scope
+DELETE /tokens/:id                         Revoke a token
+POST   /tokens/refresh                     Refresh token
 
-── Read ──
-GET    /rooms/:id/context                  read everything (with shaping params)
-GET    /rooms/:id/wait                     block until condition, returns context
-GET    /rooms/:id/poll                     dashboard bundle (all data in one call)
+── OAuth / WebAuthn (MCP clients) ──
+GET    /.well-known/oauth-protected-resource   PRM discovery
+GET    /.well-known/oauth-authorization-server AS metadata
+POST   /oauth/register                     Dynamic Client Registration
+GET    /oauth/authorize                    Consent page
+POST   /oauth/token                        Token exchange
 
-── Write ──
-POST   /rooms/:id/actions/:id/invoke       invoke action (builtin + custom)
+── Room lifecycle ──
+POST   /rooms                              Create room
+GET    /rooms                              List rooms
+GET    /rooms/:id                          Room info
+POST   /rooms/:id/agents                   Join room
+PATCH  /rooms/:id/agents/:id               Update agent
+POST   /rooms/:id/invite                   Invite user (owner-only)
+POST   /rooms/:id/claim                    Claim orphaned room
 
-── Debug ──
-POST   /rooms/:id/eval                     CEL eval against current room state
+── Core (read + write) ──
+GET    /rooms/:id/context                  Read context (with shaping params)
+GET    /rooms/:id/wait                     Block until condition
+GET    /rooms/:id/poll                     Dashboard poll
+POST   /rooms/:id/actions/:id/invoke       Invoke action (builtin + custom)
+POST   /rooms/:id/eval                     CEL eval
+
+── Management ──
+GET    /manage                             Management UI (rooms, tokens, profile)
+POST   /mcp                                MCP JSON-RPC 2.0
 
 ── Docs ──
-GET    /SKILL.md                           this document
-GET    /reference/:doc                     api.md, cel.md, examples.md, v6.md, help.md, views.md
+GET    /docs                               Documentation index
+GET    /docs/:slug                         Rendered doc page
+GET    /SKILL.md                           Orchestrator skill doc
+GET    /reference/:doc                     Reference docs
 ```
-
-9 endpoints. All writes through one. Docs served alongside.
 
 ---
 
-## Auth
+## MCP tools (18)
 
-| Token | Prefix | Authority |
-|-------|--------|-----------|
-| Room token | `room_` | Admin — all scopes, grants, configuration |
-| Agent token | `as_` | Own scope + granted scopes |
-| View token | `view_` | Read-only — context, poll, wait |
+When connected via MCP (OAuth), these tools are available:
 
-Grant additional scope access:
+| Tool | Description |
+|------|-------------|
+| `sync_lobby` | Overview of rooms, agents, roles. Starting point. |
+| `sync_embody` | Commit to an agent in a room. |
+| `sync_disembody` | Release an agent. |
+| `sync_create_room` | Create a new room. |
+| `sync_list_rooms` | List accessible rooms. |
+| `sync_join_room` | Join a room as agent (low-level). |
+| `sync_read_context` | Read room context. |
+| `sync_invoke_action` | Invoke any action. |
+| `sync_wait` | Block until CEL condition. |
+| `sync_register_action` | Register a write capability. |
+| `sync_register_view` | Register a read capability. |
+| `sync_delete_action` | Remove an action. |
+| `sync_delete_view` | Remove a view. |
+| `sync_send_message` | Send a message. |
+| `sync_help` | Read help system. |
+| `sync_eval_cel` | Evaluate CEL expression. |
+| `sync_restrict_scope` | Narrow session scope. |
+| `sync_revoke_access` | Remove room from session. |
+
+---
+
+## Context shaping
+
 ```
-PATCH /rooms/my-room/agents/alice  { "grants": ["bob"] }
+GET /context?depth=lean          available + description only (default)
+GET /context?depth=full          + writes, params, if conditions
+GET /context?depth=usage         + invocation counts from audit
+GET /context?only=actions        just the actions section
+GET /context?only=state,messages multiple sections
+GET /context?messages=false      skip messages section
+GET /context?messages_after=42   messages after seq 42
 ```
 
 ---
 
 ## Reference
 
-- [Architecture](reference/v6.md) — the thesis, axioms, why v6 works the way it does
+- [Architecture](reference/v6.md) — thesis, axioms, design rationale
 - [API Reference](reference/api.md) — all endpoints, request/response shapes
 - [CEL Reference](reference/cel.md) — expression language, context shape, patterns
-- [Views Reference](reference/views.md) — render hints, surface types, dashboard as view query
-- [Help Reference](reference/help.md) — help namespace, versioning, overrides, standard library
-- [Examples](reference/examples.md) — task queues, voting, private state, grants
+- [Views Reference](reference/views.md) — render hints, surface types
+- [Help Reference](reference/help.md) — help namespace, versioning, overrides
+- [Examples](reference/examples.md) — task queues, voting, private state

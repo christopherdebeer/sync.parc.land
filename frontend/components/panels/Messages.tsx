@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, useCallback } from "https://esm.sh/react@18.2.0";
 import { styled } from "../../styled.ts";
 import type { RawMessage, Agent } from "../../types.ts";
-import { aname, rel, tryParseJson } from "../../utils.ts";
+import { aname, rel, relTo, tryParseJson } from "../../utils.ts";
 
 const Wrap = styled.div`display: flex; flex-direction: column; gap: 0;`;
 const Log = styled.div`display: flex; flex-direction: column; gap: 1px; overflow-y: auto;`;
@@ -131,12 +131,16 @@ interface MessagesPanelProps {
   authHeaders: () => Record<string, string>;
   /** When false, disables auto-scroll entirely (e.g. in replay mode). Default true. */
   autoScroll?: boolean;
+  /** When true, hides the send bar (e.g. in replay mode). */
+  readOnly?: boolean;
+  /** When set, timestamps display as +Xs relative to this epoch instead of relative to now. */
+  epochMs?: number;
 }
 
 // Threshold in px — if the user has scrolled up more than this, don't auto-scroll.
 const SCROLL_THRESHOLD = 80;
 
-export function MessagesPanel({ messages, agentMap, roomId, baseUrl, authHeaders, autoScroll = true }: MessagesPanelProps) {
+export function MessagesPanel({ messages, agentMap, roomId, baseUrl, authHeaders, autoScroll = true, readOnly = false, epochMs }: MessagesPanelProps) {
   const logRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [msgText, setMsgText] = useState("");
@@ -200,33 +204,35 @@ export function MessagesPanel({ messages, agentMap, roomId, baseUrl, authHeaders
                   {" "}
                   <MdSpan dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
                 </Body>
-                <LogMeta>#{m.sort_key} · {rel(m.updated_at)}</LogMeta>
+                <LogMeta>#{m.sort_key} · {epochMs != null ? relTo(m.updated_at, epochMs) : rel(m.updated_at)}</LogMeta>
               </Row>
             );
           })}
           <div ref={bottomRef} />
         </Log>
       )}
-      <SendBar>
-        <KindSelect value={msgKind} onChange={e => setMsgKind(e.target.value)}>
-          <option value="chat">chat</option>
-          <option value="task">task</option>
-          <option value="result">result</option>
-          <option value="system">system</option>
-        </KindSelect>
-        <MsgInput
-          type="text"
-          placeholder="send a message…"
-          value={msgText}
-          onChange={e => setMsgText(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && !sending && sendMessage()}
-          spellCheck={false}
-        />
-        <SendBtn onClick={sendMessage} disabled={sending || !msgText.trim()}>
-          {sending ? "…" : "send"}
-        </SendBtn>
-      </SendBar>
-      {error && <SendError>{error}</SendError>}
+      {!readOnly && (
+        <SendBar>
+          <KindSelect value={msgKind} onChange={e => setMsgKind(e.target.value)}>
+            <option value="chat">chat</option>
+            <option value="task">task</option>
+            <option value="result">result</option>
+            <option value="system">system</option>
+          </KindSelect>
+          <MsgInput
+            type="text"
+            placeholder="send a message…"
+            value={msgText}
+            onChange={e => setMsgText(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && !sending && sendMessage()}
+            spellCheck={false}
+          />
+          <SendBtn onClick={sendMessage} disabled={sending || !msgText.trim()}>
+            {sending ? "…" : "send"}
+          </SendBtn>
+        </SendBar>
+      )}
+      {!readOnly && error && <SendError>{error}</SendError>}
     </Wrap>
   );
 }

@@ -22,5 +22,5 @@ export {
   handleRecoverRegisterVerify,
 } from "./manage.tsx";
 
-// Vault API + token resolution
-export { handleVault, resolveToken, resolveAdminToken } from "./vault.ts";
+// Legacy token resolution (used by tool-context.ts legacy fallback path)
+export { resolveToken } from "./vault.ts";

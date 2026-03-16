@@ -1,6 +1,10 @@
 /**
  * oauth.ts — OAuth 2.1 protocol handlers for sync-mcp.
  *
+ * v7: Token exchange writes to unified `tokens` table.
+ * New tokens use tok_ prefix. Old smcp_at_ tokens still work through
+ * extractSession fallback in mcp.ts.
+ *
  * Implements:
  * - Protected Resource Metadata (RFC 9728)
  * - Authorization Server Metadata (RFC 8414)
@@ -63,7 +67,12 @@ export function handleASMetadata(req: Request): Response {
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
-    scopes_supported: ["sync:rooms", "create_rooms", "rooms:{room_id}", "rooms:{room_id}:observe", "rooms:{room_id}:role:{role}"],
+    scopes_supported: [
+      "sync:rooms", "create_rooms",
+      "rooms:*", "rooms:*:read",
+      "rooms:{room_id}", "rooms:{room_id}:read", "rooms:{room_id}:write",
+      "rooms:{room_id}:agent:{agent_id}", "rooms:{room_id}:admin",
+    ],
   });
 }
 
@@ -171,6 +180,8 @@ export async function handleToken(req: Request): Promise<Response> {
   return json({ error: "unsupported_grant_type" }, 400);
 }
 
+// ─── Auth Code → Token (v7: writes to unified tokens table) ─────
+
 async function handleAuthCodeExchange(
   body: Record<string, string>,
 ): Promise<Response> {
@@ -214,45 +225,27 @@ async function handleAuthCodeExchange(
     }, 400);
   }
 
-  // Issue tokens
-  const accessToken = await db.generateToken("smcp_at");
-  const refreshToken = await db.generateToken("smcp_rt");
-
-  await db.saveAccessToken({
-    token: accessToken,
+  // v7: Mint unified token instead of writing to smcp_access_tokens / smcp_refresh_tokens
+  const scope = authCode.scope ?? "sync:rooms";
+  const result = await db.mintToken({
     userId: authCode.userId,
+    scope,
+    label: `OAuth: ${authCode.clientId}`,
     clientId: authCode.clientId,
-    scope: authCode.scope ?? undefined,
     expiresInSec: TOKEN_EXPIRY_SECS,
+    withRefresh: true,
   });
-
-  await db.saveRefreshToken({
-    token: refreshToken,
-    userId: authCode.userId,
-    clientId: authCode.clientId,
-    scope: authCode.scope ?? undefined,
-  });
-
-  // Create user session for the new access token (agency-identity)
-  try {
-    const atHash = await db.sha256(accessToken);
-    await db.createUserSession({
-      tokenHash: atHash,
-      userId: authCode.userId,
-      clientId: authCode.clientId,
-      scope: authCode.scope ?? "sync:rooms",
-      expiresAt: new Date(Date.now() + TOKEN_EXPIRY_SECS * 1000).toISOString(),
-    });
-  } catch (_) { /* best-effort — session tracking is additive */ }
 
   return json({
-    access_token: accessToken,
+    access_token: result.token,
     token_type: "Bearer",
     expires_in: TOKEN_EXPIRY_SECS,
-    refresh_token: refreshToken,
-    scope: authCode.scope ?? "sync:rooms",
+    refresh_token: result.refreshToken,
+    scope,
   });
 }
+
+// ─── Refresh Token → New Token (v7: handles both old and new) ───
 
 async function handleRefreshExchange(
   body: Record<string, string>,
@@ -262,6 +255,25 @@ async function handleRefreshExchange(
     return json({ error: "invalid_request" }, 400);
   }
 
+  // v7: Try unified tokens table first (ref_ prefix)
+  if (refresh_token.startsWith("ref_")) {
+    const refreshHash = await db.sha256(refresh_token);
+    const result = await db.refreshUnifiedToken(refreshHash, TOKEN_EXPIRY_SECS);
+    if (!result) {
+      return json({
+        error: "invalid_grant",
+        error_description: "Invalid or expired refresh token",
+      }, 400);
+    }
+    return json({
+      access_token: result.token,
+      token_type: "Bearer",
+      expires_in: TOKEN_EXPIRY_SECS,
+      refresh_token: result.refreshToken,
+    });
+  }
+
+  // Legacy: Try old smcp_refresh_tokens table (smcp_rt_ prefix)
   const rt = await db.consumeRefreshToken(refresh_token);
   if (!rt) {
     return json({
@@ -270,48 +282,32 @@ async function handleRefreshExchange(
     }, 400);
   }
 
-  // Issue new tokens (rotate refresh token)
-  const accessToken = await db.generateToken("smcp_at");
-  const newRefreshToken = await db.generateToken("smcp_rt");
-
-  await db.saveAccessToken({
-    token: accessToken,
+  // Migrate: mint new unified token instead of old smcp_at_ + smcp_rt_
+  const scope = rt.scope ?? "sync:rooms";
+  const result = await db.mintToken({
     userId: rt.userId,
+    scope,
+    label: `OAuth refresh: ${rt.clientId}`,
     clientId: rt.clientId,
-    scope: rt.scope ?? undefined,
     expiresInSec: TOKEN_EXPIRY_SECS,
+    withRefresh: true,
   });
 
-  await db.saveRefreshToken({
-    token: newRefreshToken,
-    userId: rt.userId,
-    clientId: rt.clientId,
-    scope: rt.scope ?? undefined,
-  });
-
-  // Create new user session and transfer embodiments (agency-identity)
+  // Transfer embodiments from old session hashes to new token hash
   try {
-    const newAtHash = await db.sha256(accessToken);
-    const newExpiry = new Date(Date.now() + TOKEN_EXPIRY_SECS * 1000).toISOString();
-    await db.createUserSession({
-      tokenHash: newAtHash,
-      userId: rt.userId,
-      clientId: rt.clientId,
-      scope: rt.scope ?? "sync:rooms",
-      expiresAt: newExpiry,
-    });
-    const oldSessions = await db.findSessionsByUserClient(rt.userId, rt.clientId, newAtHash);
+    const newTokenHash = await db.sha256(result.token);
+    const oldSessions = await db.findSessionsByUserClient(rt.userId, rt.clientId, newTokenHash);
     for (const oldHash of oldSessions) {
-      await db.transferEmbodiments(oldHash, newAtHash);
+      await db.transferEmbodiments(oldHash, newTokenHash);
       await db.deleteUserSession(oldHash);
     }
   } catch (_) { /* best-effort */ }
 
   return json({
-    access_token: accessToken,
+    access_token: result.token,
     token_type: "Bearer",
     expires_in: TOKEN_EXPIRY_SECS,
-    refresh_token: newRefreshToken,
-    scope: rt.scope ?? "sync:rooms",
+    refresh_token: result.refreshToken,
+    scope,
   });
 }

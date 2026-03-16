@@ -186,9 +186,10 @@ interface ActionCardProps {
   roomId: string;
   baseUrl: string;
   authHeaders: () => Record<string, string>;
+  readOnly?: boolean;
 }
 
-function ActionCard({ action, roomId, baseUrl, authHeaders }: ActionCardProps) {
+function ActionCard({ action, roomId, baseUrl, authHeaders, readOnly }: ActionCardProps) {
   const av = action.available !== false;
   const paramDefs = action.params || {};
   const paramKeys = Object.keys(paramDefs);
@@ -269,7 +270,7 @@ function ActionCard({ action, roomId, baseUrl, authHeaders }: ActionCardProps) {
         <ActionName $available={av}>
           {av ? "● " : "○ "}{action.id}
         </ActionName>
-        {!isBuiltin && (
+        {!isBuiltin && !readOnly && (
           <InvokeBtn $disabled={!av} onClick={av ? toggleForm : undefined}>
             {expanded ? "close" : "invoke"}
           </InvokeBtn>
@@ -347,9 +348,10 @@ interface ActionsPanelProps {
   roomId: string;
   baseUrl: string;
   authHeaders: () => Record<string, string>;
+  readOnly?: boolean;
 }
 
-export function ActionsPanel({ actions, roomId, baseUrl, authHeaders }: ActionsPanelProps) {
+export function ActionsPanel({ actions, roomId, baseUrl, authHeaders, readOnly }: ActionsPanelProps) {
   if (!actions.length) return <Empty>no actions registered</Empty>;
 
   // Sort: custom actions first, builtins after
@@ -369,6 +371,7 @@ export function ActionsPanel({ actions, roomId, baseUrl, authHeaders }: ActionsP
           roomId={roomId}
           baseUrl={baseUrl}
           authHeaders={authHeaders}
+          readOnly={readOnly}
         />
       ))}
     </Grid>

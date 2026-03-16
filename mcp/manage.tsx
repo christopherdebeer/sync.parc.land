@@ -210,60 +210,128 @@ export async function handleManageApi(req: Request): Promise<Response> {
     return json({ rooms: roomsWithDetail });
   }
 
-  // GET /manage/api/vault — full vault with tokens
-  if (req.method === "GET" && path === "/vault") {
-    const entries = await db.vaultList(userId);
+  // POST /manage/api/rooms — create a new room
+  if (req.method === "POST" && path === "/rooms") {
+    const body = await req.json();
+    const roomId = body.id ?? crypto.randomUUID();
+    const label = body.label ?? `Room: ${roomId}`;
+    // Check if room already exists
+    const existing = await sqlite.execute({
+      sql: `SELECT id FROM rooms WHERE id = ?`, args: [roomId],
+    });
+    if (existing.rows.length > 0) return json({ error: "room_exists", id: roomId }, 409);
+    // Create room
+    const { generateToken, hashToken } = await import("../auth.ts");
+    const token = generateToken("room");
+    const hash = await hashToken(token);
+    const viewToken = generateToken("view");
+    const viewHash = await hashToken(viewToken);
+    await sqlite.execute({
+      sql: `INSERT INTO rooms (id, meta, token_hash, view_token_hash) VALUES (?, ?, ?, ?)`,
+      args: [roomId, JSON.stringify(body.meta ?? {}), hash, viewHash],
+    });
+    // Link to user as owner
+    await sqlite.execute({
+      sql: `INSERT OR IGNORE INTO smcp_user_rooms (user_id, room_id, access, label)
+            VALUES (?, ?, 'owner', ?)`,
+      args: [userId, roomId, label],
+    });
+    return json({ id: roomId, label, access: "owner" }, 201);
+  }
+
+  // POST /manage/api/rooms/:id/invite — invite a user
+  if (req.method === "POST" && path.match(/^\/rooms\/[^/]+\/invite$/)) {
+    const roomId = path.split("/")[2];
+    const userRoom = await db.getUserRoom(userId, roomId);
+    if (!userRoom || userRoom.access !== "owner") {
+      return json({ error: "not_owner", message: "Only room owners can invite users" }, 403);
+    }
+    const body = await req.json();
+    const { username, role } = body;
+    if (!username) return json({ error: "username required" }, 400);
+    const validRoles = ["owner", "collaborator", "participant", "observer"];
+    const targetRole = role ?? "participant";
+    if (!validRoles.includes(targetRole)) return json({ error: "invalid_role", valid: validRoles }, 400);
+    const targetUser = await db.getUserByUsername(username);
+    if (!targetUser) return json({ error: "user_not_found", message: `No user "${username}"` }, 404);
+    await db.inviteUserToRoom(targetUser.id, roomId, targetRole, userId, body.label);
+    return json({ invited: true, username, room: roomId, role: targetRole });
+  }
+
+  // DELETE /manage/api/rooms/:id — delete a room (owner only)
+  if (req.method === "DELETE" && path.match(/^\/rooms\/[^/]+$/)) {
+    const roomId = path.split("/")[2];
+    const userRoom = await db.getUserRoom(userId, roomId);
+    if (!userRoom || userRoom.access !== "owner") {
+      return json({ error: "not_owner", message: "Only room owners can delete rooms" }, 403);
+    }
+    // Delete room data (cascade: agents, state, actions, views, messages, audit)
+    await sqlite.batch([
+      { sql: `DELETE FROM state WHERE room_id = ?`, args: [roomId] },
+      { sql: `DELETE FROM actions WHERE room_id = ?`, args: [roomId] },
+      { sql: `DELETE FROM views WHERE room_id = ?`, args: [roomId] },
+      { sql: `DELETE FROM agents WHERE room_id = ?`, args: [roomId] },
+      { sql: `DELETE FROM smcp_user_rooms WHERE room_id = ?`, args: [roomId] },
+      { sql: `DELETE FROM rooms WHERE id = ?`, args: [roomId] },
+    ]);
+    return json({ deleted: true, room: roomId });
+  }
+
+  // POST /manage/api/room-token — mint a temporary token for dashboard access
+  if (req.method === "POST" && path === "/room-token") {
+    const body = await req.json();
+    const roomId = body.room_id;
+    if (!roomId) return json({ error: "room_id required" }, 400);
+
+    // Check user has access to this room
+    const userRoom = await db.getUserRoom(userId, roomId);
+    if (!userRoom) return json({ error: "no_access", message: "You don't have access to this room" }, 403);
+
+    // Mint a short-lived token scoped to this room
+    const level = userRoom.access === "owner" ? "" : ":read";
+    const result = await db.mintToken({
+      userId,
+      scope: `rooms:${roomId}${level}`,
+      label: `Dashboard: ${roomId}`,
+      roomId,
+      expiresInSec: 3600, // 1 hour
+    });
+
     return json({
-      entries: entries.map((e) => ({
-        id: e.id,
-        room_id: e.roomId,
-        token: e.token,
-        token_type: e.tokenType,
-        label: e.label,
-        is_default: e.isDefault,
+      token: result.token,
+      room_id: roomId,
+      access: userRoom.access,
+      expires_at: result.expiresAt,
+    });
+  }
+
+  // ── Unified tokens (v7) ──
+
+  // GET /manage/api/tokens — list unified tokens
+  if (req.method === "GET" && path === "/tokens") {
+    const tokens = await db.listUserTokens(userId);
+    return json({
+      tokens: tokens.map(t => ({
+        id: t.id,
+        scope: t.scope,
+        label: t.label,
+        room_id: t.roomId,
+        agent_id: t.agentId,
+        client_id: t.clientId,
+        revoked: t.revoked,
+        expires_at: t.expiresAt,
+        created_at: t.createdAt,
       })),
     });
   }
 
-  // DELETE /manage/api/vault/:id
-  if (req.method === "DELETE" && path.startsWith("/vault/")) {
-    const vaultId = path.split("/")[2];
-    if (!vaultId) return json({ error: "Missing vault entry ID" }, 400);
-    await db.vaultDelete(userId, vaultId);
-    return json({ deleted: true, id: vaultId });
-  }
-
-  // POST /manage/api/vault/:id/default — set as default
-  if (req.method === "POST" && path.match(/^\/vault\/[^/]+\/default$/)) {
-    const vaultId = path.split("/")[2];
-    const entries = await db.vaultList(userId);
-    const target = entries.find((e) => e.id === vaultId);
-    if (!target) return json({ error: "Vault entry not found" }, 404);
-
-    for (const e of entries) {
-      if (e.isDefault) {
-        await db.vaultDelete(userId, e.id);
-        await db.vaultStore({
-          userId,
-          roomId: e.roomId,
-          token: e.token,
-          tokenType: e.tokenType,
-          label: e.label ?? undefined,
-          isDefault: false,
-        });
-      }
-    }
-    await db.vaultDelete(userId, vaultId);
-    await db.vaultStore({
-      userId,
-      roomId: target.roomId,
-      token: target.token,
-      tokenType: target.tokenType,
-      label: target.label ?? undefined,
-      isDefault: true,
-    });
-
-    return json({ ok: true, default_room: target.roomId });
+  // DELETE /manage/api/tokens/:id — revoke a unified token
+  if (req.method === "DELETE" && path.startsWith("/tokens/")) {
+    const tokenId = path.split("/")[2];
+    if (!tokenId) return json({ error: "Missing token ID" }, 400);
+    const ok = await db.revokeToken(tokenId, userId);
+    if (!ok) return json({ error: "Token not found or not owned by you" }, 404);
+    return json({ revoked: true, id: tokenId });
   }
 
   // POST /manage/api/recovery — generate recovery token
