@@ -256,3 +256,206 @@ which approach is current.
 | P3 | `self` empty string (#9) | Ergonomics |
 | P3 | MCP tool count (#6) | Doc nit |
 | P3 | `_dashboard` vs surfaces (#12) | Doc clarity |
+
+---
+
+## Part 2: Authenticated testing
+
+Obtained a device token (`rooms:* create_rooms` scope) and exercised the full
+workflow end-to-end: room creation, agent embodiment, action registration,
+invocation, views, messages, wait, contest detection, token minting, and cleanup.
+
+### 13. `registered_by` is always null
+
+**Finding:** When registering actions with either a `tok_` (user token) or
+`as_` (agent token), the `registered_by` field in the response is always `null`.
+
+```json
+{
+  "id": "test_reg",
+  "registered_by": null,
+  ...
+}
+```
+
+This defeats provenance tracking — you can't tell who registered an action.
+
+**Recommendation:** Populate `registered_by` from the authenticated identity
+(agent name or user ID).
+
+### 14. `self` is empty string with user token, populated with agent token
+
+**Finding:**
+- `Authorization: Bearer tok_xxx` → `"self": ""`
+- `Authorization: Bearer as_xxx` → `"self": "reviewer"`
+
+This is correct behavior but undocumented. An LLM agent using a `tok_` token
+that tries `${self}` interpolation in action writes will get empty strings.
+
+**Recommendation:** Document in the auth section that `self` identity requires
+either an agent-scoped token (`as_` prefix) or a `rooms:room:agent:name` scoped
+`tok_` token. User-level tokens don't have agent identity.
+
+### 15. Room creation returns legacy tokens
+
+**Finding:** `POST /rooms` returns:
+```json
+{
+  "id": "my-room",
+  "created_at": "...",
+  "token": "room_...",
+  "view_token": "view_..."
+}
+```
+
+Agent join returns:
+```json
+{
+  "id": "reviewer",
+  "token": "as_..."
+}
+```
+
+These legacy prefixed tokens are mentioned in the SKILL.md ("Legacy tokens"
+section) but the room creation response shape including `token` and `view_token`
+is not documented. An LLM agent wouldn't know these are usable tokens unless
+it infers from the prefix.
+
+**Recommendation:** Either document the creation response shape (showing that
+tokens are included) or remove them from the response if the intent is to
+deprecate legacy tokens.
+
+### 16. `_send_message` response differs from custom action responses
+
+**Finding:** Custom action invocation returns:
+```json
+{
+  "invoked": true,
+  "action": "submit_result",
+  "agent": "reviewer",
+  "writes": [{ ... }]
+}
+```
+
+But `_send_message` returns:
+```json
+{
+  "ok": true,
+  "action": "_send_message",
+  "seq": 2,
+  "from": "reviewer",
+  "kind": "chat"
+}
+```
+
+Different keys (`invoked` vs `ok`), different structure (no `writes`, adds
+`seq`/`from`/`kind`). An LLM checking for `response.invoked` after sending a
+message would see undefined/null.
+
+**Recommendation:** Consider normalizing built-in action responses to match
+custom action shape, or document the difference.
+
+### 17. `depth=full` includes `writes` for custom actions (correcting #8)
+
+**Finding:** My initial test used only built-in actions which don't have user-
+defined `writes`. With custom actions registered, `depth=full` correctly includes
+`writes`, `params`, and `enabled` in the action value. `depth=usage` is identical
+to `depth=full` — both show the same keys. The SKILL.md claim that `depth=usage`
+adds "invocation counts" is misleading since invocation data lives in `_meta`
+at all depth levels.
+
+**Updated recommendation:** Document that `depth=usage` = `depth=full` + (invocation
+counts already in `_meta`), or clarify what `depth=usage` adds beyond `depth=full`.
+
+### 18. CEL `string.replace()` not available
+
+**Finding:** Attempting to use `.replace()` in a view expression:
+```
+k.replace(".result", "")
+```
+Returns: `found no matching overload for 'dyn.replace(string, string)'`
+
+The SKILL.md CEL section doesn't document which string methods are available.
+Standard CEL has `startsWith`, `endsWith`, `contains`, `matches`, `size` —
+these all work. But `replace`, `split`, `trim`, `toLowerCase` etc. are not
+available.
+
+The help system (`help({ key: "expressions" })`) also doesn't list available
+string methods.
+
+**Recommendation:** Add a brief note in the CEL section or help doc listing
+available string methods: `startsWith`, `endsWith`, `contains`, `matches`, `size`.
+
+### 19. `GET /manage` returns 404
+
+**Finding:** The API surface table lists `GET /manage` as "Management UI" but
+it returns 404.
+
+### 20. Invite endpoint requires `username` (undocumented)
+
+**Finding:** `POST /rooms/:id/invite` returns `{"error":"username is required"}`
+but the SKILL.md only lists it as "Invite user" with no documented params.
+
+### 21. `GET /rooms` response lacks role information
+
+**Finding:** Room listing returns `[{id, created_at, meta}]` with no role
+field. The MCP tool `sync_lobby` is described as showing "rooms, agents, roles"
+but the raw HTTP endpoint doesn't include role data.
+
+### 22. Contest detection works exactly as documented
+
+**Finding:** Registering two actions that write to the same `(scope, key)`:
+- Second registration includes `"warning": "competing_write_targets"` and
+  `"contested_targets"` / `"competing_actions"` in the response
+- Both actions show each other in `_meta.contested` in context
+- `contested(actions)` CEL helper works
+
+This is one of the best-documented features — the behavior matches the docs
+exactly.
+
+### 23. `if` guard (precondition) works correctly
+
+**Finding:** Registering an action with an `if` expression and invoking when
+the guard evaluates to false returns:
+```json
+{
+  "error": "precondition_failed",
+  "action": "guarded_write",
+  "expression": "has(state._shared.phase) && state._shared.phase.value == \"active\""
+}
+```
+
+Clean, informative error. The expression is echoed back for debugging.
+
+### 24. Read-only token enforcement works
+
+**Finding:** A `rooms:demo:read` scoped token can read context but cannot
+invoke actions — returns `{"error":"read_only_token","message":"view tokens cannot
+perform mutations"}`. Scope narrowing works correctly.
+
+---
+
+## Updated priority ranking
+
+| Priority | Issue | Type |
+|----------|-------|------|
+| P0 | Auth inconsistency on read endpoints (#1) | Security |
+| P0 | Raw stack traces (#4) | Security |
+| P1 | Phantom rooms on context (#2) | Bug |
+| P1 | Error format inconsistency (#5) | Ergonomics |
+| P1 | Step 2 missing auth header (#11) | Doc accuracy |
+| P1 | `registered_by` always null (#13) | Bug |
+| P1 | `_send_message` response differs from custom actions (#16) | Ergonomics |
+| P2 | Version drift in reference docs (#3) | Doc staleness |
+| P2 | OAuth scope mismatch (#7) | Doc completeness |
+| P2 | `depth=usage` vs `depth=full` identical (#17) | Doc accuracy |
+| P2 | Relative links (#10) | Ergonomics |
+| P2 | CEL string methods undocumented (#18) | Doc completeness |
+| P2 | `/manage` returns 404 (#19) | Bug/stale |
+| P2 | Invite params undocumented (#20) | Doc completeness |
+| P2 | Room list lacks role (#21) | Doc/API gap |
+| P2 | `self` identity requires agent token (#14) | Doc clarity |
+| P2 | Room creation returns legacy tokens (#15) | Doc completeness |
+| P3 | `self` empty string (#9) | Ergonomics |
+| P3 | MCP tool count (#6) | Doc nit |
+| P3 | `_dashboard` vs surfaces (#12) | Doc clarity |
