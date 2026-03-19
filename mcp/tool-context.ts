@@ -88,14 +88,25 @@ export async function resolveForTool(
   return { room: resolved.room, token: resolved.token, auth };
 }
 
-/** Unwrap a Response into data. Throws on error status. */
+/** Unwrap a Response into data. Throws on error status with full structured detail. */
 export async function unwrap(response: Response): Promise<unknown> {
   const data = await response.json();
   if (response.status >= 400) {
-    const msg = typeof data === "object"
-      ? (data.error ?? data.message ?? JSON.stringify(data))
-      : String(data);
-    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    // Preserve full error body for MCP consumers — agents need hint, help, stage, source
+    if (typeof data === "object" && data !== null) {
+      const parts: string[] = [];
+      if (data.error) parts.push(String(data.error));
+      if (data.detail) parts.push(String(data.detail));
+      if (data.hint) parts.push(`Hint: ${data.hint}`);
+      if (data.help) parts.push(`Help: invoke help({ key: "${data.help}" })`);
+      if (data.source) parts.push(`Source: ${data.source}`);
+      if (data.stage) parts.push(`Stage: ${data.stage}`);
+      if (data.field) parts.push(`Field: ${data.field}`);
+      // Elevation URL for scope_denied
+      if (data.elevate) parts.push(`Elevate: ${data.elevate}`);
+      throw new Error(parts.join("\n"));
+    }
+    throw new Error(String(data));
   }
   return data;
 }
@@ -115,7 +126,14 @@ export async function withResponseEscalation(
   const isScopeDenied = error === "scope_denied" || error === "room_token_required";
 
   if (!isScopeDenied) {
-    throw new Error(typeof error === "string" ? error : JSON.stringify(data));
+    // Preserve structured error for MCP consumers
+    const parts: string[] = [];
+    if (typeof error === "string") parts.push(error);
+    if (data.detail) parts.push(String(data.detail));
+    if (data.hint) parts.push(`Hint: ${data.hint}`);
+    if (data.help) parts.push(`Help: invoke help({ key: "${data.help}" })`);
+    if (data.stage) parts.push(`Stage: ${data.stage}`);
+    throw new Error(parts.length > 0 ? parts.join("\n") : JSON.stringify(data));
   }
 
   const adminAuth = await ctx.resolveAdminAuth(room);

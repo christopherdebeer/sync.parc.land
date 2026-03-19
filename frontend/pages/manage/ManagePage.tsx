@@ -404,7 +404,7 @@ export function ManagePage({ origin, dashboardOrigin }: ManagePageProps) {
                               {roleCount > 0 && <RoomMeta> · {roleCount} role{roleCount > 1 ? "s" : ""}</RoomMeta>}
                             </div>
                           </div>
-                          <DashLink href={`${dashBase}?room=${encodeURIComponent(r.room_id)}`} target="_blank" onClick={e => e.stopPropagation()}>dashboard</DashLink>
+                          <DashLink href={`${dashBase}/rooms/${encodeURIComponent(r.room_id)}/dashboard`} target="_blank" onClick={e => e.stopPropagation()}>dashboard</DashLink>
                         </RoomHeader>
                         {isOpen && (
                           <RoomDetail>

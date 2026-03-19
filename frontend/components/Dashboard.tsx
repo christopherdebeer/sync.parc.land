@@ -576,6 +576,7 @@ export function Dashboard({ roomId }: DashboardProps) {
     return data.state.filter(s => s.scope !== "_audit").map(s => ({
       room_id: "", scope: s.scope, key: s.key, value: s.value,
       version: s.revision, sort_key: s.sort_key ?? undefined, updated_at: s.updated_at,
+      _meta: (s as any)._meta ?? null,
     }));
   }, [data]);
 
@@ -588,6 +589,7 @@ export function Dashboard({ roomId }: DashboardProps) {
     description: a.def.description, available: a.available,
     params: a.def.params, writes: a.def.writes, version: 1,
     registered_by: a.def.registered_by, if: a.def.if,
+    _meta: a._meta ?? null,
   })), [derivedActions]);
 
   const panelViews = useMemo(() => derivedViews.map(v => ({
@@ -663,7 +665,7 @@ export function Dashboard({ roomId }: DashboardProps) {
         <Headers>
           <HeaderRow>
             <div>
-              <Title><a href="/">{titleText}</a>{!dashConfig?.title && <span style={{ color: "var(--dim)", fontWeight: 400 }}> v6</span>}</Title>
+              <Title><a href="/">{titleText}</a>{!dashConfig?.title && <span style={{ color: "var(--dim)", fontWeight: 400 }}> v9</span>}</Title>
               <Subtitle>{subtitleText}</Subtitle>
             </div>
             <PollInfo><Dot $error={pollStatus === "error"} />{pollStatus === "live" ? "live" : pollStatus === "error" ? "error" : "connecting…"}</PollInfo>

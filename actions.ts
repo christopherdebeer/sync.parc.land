@@ -1,13 +1,13 @@
 /**
  * actions.ts — Action registration, deletion, and helpers.
  *
- * v8: Actions are state. Definitions + timer cooldown state stored in _actions scope only.
- * Legacy actions table removed — all reads and writes go through state.
+ * v9: Uses Environment-based CEL validation (validateExpression) with
+ * structured error feedback including stage, hints, and lint warnings.
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";
 import { json, rows2objects } from "./utils.ts";
-import { validateCel } from "./cel.ts";
+import { validateExpression } from "./cel.ts";
 import { parseTimer, validateTimer } from "./timers.ts";
 import { appendStructuralEvent } from "./audit.ts";
 import type { AuthResult } from "./auth.ts";
@@ -45,6 +45,51 @@ export async function computeContestedTargets(roomId: string): Promise<Record<st
   return contested;
 }
 
+/** Validate a CEL field on an action definition, returning a structured error response or null if valid. */
+function validateActionCel(field: string, expr: string): Response | null {
+  const result = validateExpression(expr);
+  if (result.valid) return null;
+  if (result.stage === "eval" && result.error?.includes("No such key")) return null;
+  return json({
+    error: "invalid_cel",
+    field,
+    stage: result.stage,
+    detail: result.error,
+    hint: result.hint,
+    source: result.source,
+    help: result.help ?? "expressions",
+  }, 400) as unknown as Response;
+}
+
+/** Collect lint warnings from all CEL fields on an action definition. */
+function collectCelWarnings(body: any): string[] {
+  const warnings: string[] = [];
+  for (const field of ["if", "enabled", "result"]) {
+    if (body[field]) {
+      const result = validateExpression(body[field]);
+      if (result.warnings) {
+        for (const w of result.warnings) {
+          warnings.push(`${field}: ${w}`);
+        }
+      }
+    }
+  }
+  // Also lint write expressions
+  if (Array.isArray(body.writes)) {
+    for (const w of body.writes) {
+      if (w.expr === true && typeof w.value === "string") {
+        const result = validateExpression(w.value);
+        if (result.warnings) {
+          for (const warn of result.warnings) {
+            warnings.push(`writes[].value: ${warn}`);
+          }
+        }
+      }
+    }
+  }
+  return warnings;
+}
+
 export async function registerAction(roomId: string, body: any, auth: AuthResult) {
   const id = body.id;
   if (!id) return json({ error: "id is required" }, 400);
@@ -58,10 +103,10 @@ export async function registerAction(roomId: string, body: any, auth: AuthResult
     }
   }
 
-  // Validate expressions
-  if (body.if) { const v = validateCel(body.if); if (!v.valid) return json({ error: "invalid_cel", field: "if", detail: v.error }, 400); }
-  if (body.enabled) { const v = validateCel(body.enabled); if (!v.valid) return json({ error: "invalid_cel", field: "enabled", detail: v.error }, 400); }
-  if (body.result) { const v = validateCel(body.result); if (!v.valid) return json({ error: "invalid_cel", field: "result", detail: v.error }, 400); }
+  // Validate expressions with structured feedback
+  if (body.if) { const err = validateActionCel("if", body.if); if (err) return err; }
+  if (body.enabled) { const err = validateActionCel("enabled", body.enabled); if (err) return err; }
+  if (body.result) { const err = validateActionCel("result", body.result); if (err) return err; }
 
   if (body.timer) {
     const tv = validateTimer(body.timer);
@@ -132,7 +177,7 @@ export async function registerAction(roomId: string, body: any, auth: AuthResult
     };
   }
 
-  // Write to _actions scope (single source of truth)
+  // Write to _actions scope
   const actionDef = {
     description: body.description ?? null,
     if: body.if ?? null,
@@ -144,7 +189,7 @@ export async function registerAction(roomId: string, body: any, auth: AuthResult
     registered_by: registeredBy,
     timer: body.timer ?? null,
     on_invoke: body.on_invoke ?? null,
-    _timer: timerState,  // mutable runtime timer state (updated on invoke)
+    _timer: timerState,
   };
 
   await sqlite.execute({
@@ -161,7 +206,7 @@ export async function registerAction(roomId: string, body: any, auth: AuthResult
     writes, params: body.params ?? null,
   }).catch(() => {});
 
-  // Build response directly from input
+  // Build response
   const response: any = {
     id, room_id: roomId, scope, description: body.description ?? null,
     registered_by: registeredBy, writes, params: body.params ?? null,
@@ -200,6 +245,13 @@ export async function registerAction(roomId: string, body: any, auth: AuthResult
         ? "medium — write behavior changed"
         : "low — parameter schema changed but write targets unchanged",
     };
+  }
+
+  // Collect lint warnings from CEL expressions
+  const celWarnings = collectCelWarnings(body);
+  if (celWarnings.length > 0) {
+    warnings.push("cel_lint");
+    warningDetails.cel_warnings = celWarnings;
   }
 
   if (warnings.length > 0) {

@@ -1,14 +1,13 @@
 /**
  * views.ts — View registration and deletion.
  *
- * v8: Views are state. Definitions stored in _views scope only.
- * Legacy views table removed — all reads and writes go through state.
+ * v9: Uses Environment-based CEL evaluation (celEval) and rich validation
+ * (validateExpression) with lint warnings for old-style patterns.
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";
-import { evaluate } from "npm:@marcbachmann/cel-js";
 import { json, rows2objects } from "./utils.ts";
-import { validateCel, buildContext, buildViewContext } from "./cel.ts";
+import { validateCel, validateExpression, celEval, buildContext, buildViewContext } from "./cel.ts";
 import { parseTimer, validateTimer } from "./timers.ts";
 import { appendStructuralEvent } from "./audit.ts";
 import { extractDependencies } from "./deps.ts";
@@ -28,12 +27,33 @@ export async function registerView(roomId: string, body: any, auth: AuthResult) 
     }
   }
 
-  // Validate expression
-  const v = validateCel(body.expr);
-  if (!v.valid) return json({ error: "invalid_cel", field: "expr", detail: v.error }, 400);
+  // Validate expression with full pipeline
+  const exprValidation = validateExpression(body.expr);
+  if (!exprValidation.valid) {
+    return json({
+      error: "invalid_cel",
+      field: "expr",
+      stage: exprValidation.stage,
+      detail: exprValidation.error,
+      hint: exprValidation.hint,
+      source: exprValidation.source,
+      help: exprValidation.help ?? "expressions",
+    }, 400);
+  }
+
   if (body.enabled) {
-    const ev = validateCel(body.enabled);
-    if (!ev.valid) return json({ error: "invalid_cel", field: "enabled", detail: ev.error }, 400);
+    const enabledValidation = validateExpression(body.enabled);
+    if (!enabledValidation.valid) {
+      return json({
+        error: "invalid_cel",
+        field: "enabled",
+        stage: enabledValidation.stage,
+        detail: enabledValidation.error,
+        hint: enabledValidation.hint,
+        source: enabledValidation.source,
+        help: enabledValidation.help ?? "expressions",
+      }, 400);
+    }
   }
 
   if (body.timer) {
@@ -47,9 +67,9 @@ export async function registerView(roomId: string, body: any, auth: AuthResult) 
   let deps: any[] = [];
   try {
     deps = extractDependencies(body.expr);
-  } catch { /* non-fatal — deps will be empty */ }
+  } catch { /* non-fatal */ }
 
-  // Write to _views scope (single source of truth)
+  // Write to _views scope
   const viewStateValue = JSON.stringify({
     expr: body.expr,
     description: body.description ?? null,
@@ -68,12 +88,12 @@ export async function registerView(roomId: string, body: any, auth: AuthResult) 
     args: [roomId, id, viewStateValue],
   });
 
-  // Evaluate current value
+  // Evaluate current value using Environment
   const ctx = await buildContext(roomId, { selfAgent: auth.agentId ?? undefined });
   const viewCtx = await buildViewContext(roomId, scope, ctx);
   let resolvedValue: any = null;
   try {
-    const evalResult = evaluate(body.expr, viewCtx);
+    const evalResult = celEval(body.expr, viewCtx);
     resolvedValue = typeof evalResult === "bigint" ? Number(evalResult) : evalResult;
   } catch (e: any) {
     resolvedValue = { _error: e.message };
@@ -85,13 +105,23 @@ export async function registerView(roomId: string, body: any, auth: AuthResult) 
     render: body.render ?? null, deps,
   }).catch(() => {});
 
-  return json({
+  const response: any = {
     id, room_id: roomId, scope, description: body.description ?? null,
     expr: body.expr, enabled: body.enabled ?? null,
     render: body.render ?? null,
     registered_by: registeredBy,
     value: resolvedValue, deps,
-  }, 201);
+  };
+
+  // Include lint warnings if any
+  const allWarnings = [
+    ...(exprValidation.warnings ?? []),
+  ];
+  if (allWarnings.length > 0) {
+    response.warnings = allWarnings;
+  }
+
+  return json(response, 201);
 }
 
 export async function deleteView(roomId: string, viewId: string, auth: AuthResult) {

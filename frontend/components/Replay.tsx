@@ -428,7 +428,7 @@ type ReplayTab = "surfaces" | "agents" | "state" | "messages" | "actions" | "vie
 
 export function ReplayWidget({ roomId, viewToken, height = 420 }: ReplayWidgetProps) {
   const [auditLog, setAuditLog] = useState<AuditRow[]>([]);
-  const [snapshot, setSnapshot] = useState<PollData | null>(null);
+  const [snapshot, setSnapshot] = useState<any | null>(null);
   const [playIdx, setPlayIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<Speed>(1);

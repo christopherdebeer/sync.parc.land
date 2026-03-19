@@ -1,5 +1,5 @@
-// v8 — merged from v8 branch · legacy tables dropped · substrate surfaces
-// force-restart: 2026-03-15T14:00Z
+// v9 — wrapped state model · { value, _meta } · Environment CEL
+// force-restart: 2026-03-16T23:40Z
 //
 // main.ts — HTTP router + barrel re-exports.
 //
@@ -53,9 +53,8 @@ import { waitForCondition } from "./wait.ts";
 import { replayRoom } from "./replay.ts";
 import { queryKeyHistory, queryPrefixHistory } from "./schema-v8.ts";
 import { queryViewSamples } from "./sampling.ts";
-import { computeSalience } from "./salience.ts";
-import { dashboardPollV8 } from "./poll-v8.ts";
-import { renderDashboardV8 } from "./frontend/dashboard-v8.ts";
+import { computeRoomMeta, computeScore, loadAgentContext } from "./meta.ts";
+import { dashboardPoll } from "./poll-v8.ts";
 import { parseScope } from "./mcp/scope.ts";
 import { validateTokenByHash } from "./mcp/db.ts";
 // v7: Device auth + token management
@@ -132,7 +131,7 @@ export default async function (req: Request) {
   const response = await route(req, url);
 
   // v8: Add version header to every response for debugging stale isolates
-  response.headers.set("X-Sync-Version", "v8-625");
+  response.headers.set("X-Sync-Version", "v9");
 
   if (compact && response.headers.get("Content-Type")?.includes("json")) {
     const data = await response.json();
@@ -366,7 +365,13 @@ async function route(req: Request, _url?: URL): Promise<Response> {
     if (url.pathname === "/" || url.pathname === "") {
       const roomId = url.searchParams.get("room");
       const docId = url.searchParams.get("doc");
-      if (roomId) return renderDashboardPage(roomId);
+      if (roomId) {
+        // Redirect to canonical dashboard URL
+        return new Response(null, {
+          status: 302,
+          headers: { "Location": `/rooms/${encodeURIComponent(roomId)}/dashboard` },
+        });
+      }
       if (docId) {
         const slug = docId.replace(/\.md$/, "");
         return new Response(null, {
@@ -531,8 +536,8 @@ async function route(req: Request, _url?: URL): Promise<Response> {
     return json({ deleted: true, room: roomId });
   }
 
-  // ---- v8: Standalone dashboard (no React SSR) ----
-  if (method === "GET" && sub === "dashboard") return renderDashboardV8(roomId);
+  // ---- v9: SSR dashboard (canonical URL) ----
+  if (method === "GET" && sub === "dashboard") return renderDashboardPage(roomId);
 
   // ---- Agents ----
   if (sub === "agents") {
@@ -567,7 +572,7 @@ async function route(req: Request, _url?: URL): Promise<Response> {
 
   // ---- Dashboard poll (v8: state-only) ----
   if (method === "GET" && sub === "poll") {
-    return dashboardPollV8(roomId, url, auth);
+    return dashboardPoll(roomId, url, auth);
   }
 
   // ---- Replay ----
@@ -615,7 +620,7 @@ async function route(req: Request, _url?: URL): Promise<Response> {
     return json({ room_id: roomId, view_id: subId, samples: results });
   }
 
-  // ---- v8: Salience map (agent-specific relevance scores) ----
+  // ---- v9: Salience map (agent-specific relevance scores via meta.ts) ----
   // GET /rooms/:id/salience?limit=50&agent=X (agent param for room/admin tokens)
   if (method === "GET" && sub === "salience") {
     if (!auth.authenticated) {
@@ -624,7 +629,6 @@ async function route(req: Request, _url?: URL): Promise<Response> {
         message: "Salience requires authentication",
       }, 401);
     }
-    // Allow room/admin/view tokens to view any agent's salience via ?agent= param
     let agentId = auth.agentId;
     const agentParam = url.searchParams.get("agent");
     if (
@@ -642,8 +646,29 @@ async function route(req: Request, _url?: URL): Promise<Response> {
       }, 400);
     }
     const limit = parseInt(url.searchParams.get("limit") ?? "50");
-    const map = await computeSalience(roomId, agentId, { limit });
-    return json(map);
+
+    // v9: Use meta.ts for salience computation
+    const roomMeta = await computeRoomMeta(roomId);
+    const stateResult = await sqlite.execute({
+      sql: `SELECT scope, key, value, revision, updated_at FROM state WHERE room_id = ? AND scope NOT IN ('_audit')`,
+      args: [roomId],
+    });
+    const stateRows = rows2objects(stateResult) as any[];
+    const agentCtx = await loadAgentContext(roomId, agentId, stateRows);
+
+    const entries = stateRows.map((row: any) => {
+      let val: any;
+      try { val = JSON.parse(row.value); } catch { val = row.value; }
+      const score = computeScore(row.scope, row.key, row.updated_at, val, agentCtx, roomMeta);
+      return { scope: row.scope, key: row.key, score };
+    }).sort((a: any, b: any) => b.score - a.score).slice(0, limit);
+
+    return json({
+      agent: agentId,
+      weights: agentCtx.weights,
+      entries,
+      computed_at: new Date().toISOString(),
+    });
   }
 
   // ---- CEL eval ----

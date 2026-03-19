@@ -1,57 +1,77 @@
 /**
- * context.ts — Context assembly and CEL evaluation endpoint.
+ * context.ts — v9 Projection layer.
  *
- * Contains buildExpandedContext (the main context builder for MCP /context endpoint),
- * evalExpression, and the ContextRequest interface + parser.
+ * Takes the full wrapped context from buildContext (engine layer) and shapes
+ * it for the requesting agent based on salience thresholds.
  *
- * v8: Dashboard polling moved to poll-v8.ts (state-only, no legacy tables).
- * The old dashboardPoll has been removed.
+ * Three tiers:
+ *   Focus      (score >= focus_threshold):   full value + full _meta
+ *   Peripheral (score >= elide_threshold):   full value + minimal _meta
+ *   Elided     (score <  elide_threshold):   value: null + minimal _meta + expand hint
+ *
+ * Override params:
+ *   expand        — force specific keys to Focus (e.g. ["_shared.some_key"])
+ *   elision       — "none" to disable elision entirely
+ *   meta_threshold — override where full _meta kicks in (default: 0.5)
+ *   focus_threshold — override focus threshold (default: 0.5)
+ *   elide_threshold — override elide threshold (default: 0.1)
+ *
+ * Replaces: _salience synthetic view, _contested synthetic view, _context envelope.
+ * All metadata now lives in _meta on the relevant entries.
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";
-import { evaluate } from "npm:@marcbachmann/cel-js";
 import { json, rows2objects } from "./utils.ts";
-import { buildContext, buildViewContext, evalCel, type BuildContextOptions } from "./cel.ts";
+import {
+  buildContext,
+  celEval,
+  evalCel,
+  type BuildContextOptions,
+  type WrappedEntry,
+  type EntryMeta,
+} from "./cel.ts";
 import { isTimerLive } from "./timers.ts";
 import { hasFullReadAccess, touchAgent, type AuthResult } from "./auth.ts";
-import { computeContestedTargets } from "./actions.ts";
 import { BUILTIN_ACTIONS, OVERRIDABLE_BUILTINS } from "./invoke.ts";
-import { HELP_SYSTEM } from "./help-content.ts";
-import { computeSalience } from "./salience.ts";
+import { minimalMeta } from "./meta.ts";
 
-// ── ContextRequest ──
+// ── ContextRequest ──────────────────────────────────────────────────────
 
-/** ContextRequest — first-class type describing what context to return.
- *
- * The agent can request different shapes of context:
- * - `depth`: how much action detail to include
- *     "lean"  — id, description, available (default — smallest payload)
- *     "full"  — + writes, if, params
- *     "usage" — + invocation_count (adoption signal)
- * - `only`: return only these top-level sections (e.g. ["state", "messages"])
- * - `actions`: include actions section (default true)
- * - `messages`: include messages section (default true)
- * - `messagesAfter`: seq cursor — only return messages after this seq
- * - `messagesLimit`: max messages to return (default 100, max 500)
- * - `include`: extra state scopes to include (e.g. "_audit")
- */
 export interface ContextRequest {
+  /** Action detail level */
   depth?: "lean" | "full" | "usage";
+  /** Return only these top-level sections */
   only?: string[];
+  /** Include actions section (default true) */
   actions?: boolean;
+  /** Include messages section (default true) */
   messages?: boolean;
+  /** Message seq cursor — only return messages after this seq */
   messagesAfter?: number;
+  /** Max messages to return (default 100, max 500) */
   messagesLimit?: number;
+  /** Extra state scopes to include (e.g. "_audit") */
   include?: string[];
+
+  // ── v9 shaping params ──
+
+  /** Force specific keys to Focus tier: ["_shared.key1", "_agents.explorer"] */
+  expand?: string[];
+  /** Disable elision entirely: "none" */
+  elision?: "none" | "auto";
+  /** Threshold for full _meta (default 0.5) */
+  focusThreshold?: number;
+  /** Threshold below which values are elided (default 0.1) */
+  elideThreshold?: number;
 }
 
-/** Parse a ContextRequest from URL search params */
+/** Parse a ContextRequest from URL search params or MCP tool params */
 export function parseContextRequest(url: URL): ContextRequest {
   const req: ContextRequest = {};
   const depth = url.searchParams.get("depth");
   if (depth === "lean" || depth === "full" || depth === "usage") req.depth = depth;
   const only = url.searchParams.get("only");
-  if (only) req.only = only.split(",").map(s => s.trim()).filter(Boolean);
+  if (only) req.only = only.split(",").map((s) => s.trim()).filter(Boolean);
   const actions = url.searchParams.get("actions");
   if (actions === "false") req.actions = false;
   const messages = url.searchParams.get("messages");
@@ -61,35 +81,239 @@ export function parseContextRequest(url: URL): ContextRequest {
   const limit = url.searchParams.get("messages_limit");
   if (limit) req.messagesLimit = parseInt(limit);
   const include = url.searchParams.get("include");
-  if (include) req.include = include.split(",").map(s => s.trim()).filter(Boolean);
+  if (include) req.include = include.split(",").map((s) => s.trim()).filter(Boolean);
+
+  // v9 shaping
+  const expand = url.searchParams.get("expand");
+  if (expand) req.expand = expand.split(",").map((s) => s.trim()).filter(Boolean);
+  const elision = url.searchParams.get("elision");
+  if (elision === "none") req.elision = "none";
+  const focusThreshold = url.searchParams.get("focus_threshold");
+  if (focusThreshold) req.focusThreshold = parseFloat(focusThreshold);
+  const elideThreshold = url.searchParams.get("elide_threshold");
+  if (elideThreshold) req.elideThreshold = parseFloat(elideThreshold);
+
   return req;
 }
 
-// ── buildExpandedContext ──
+// ── Shaping ─────────────────────────────────────────────────────────────
 
-/** Build expanded context with message bodies, full action definitions, and built-in actions.
+const DEFAULT_FOCUS_THRESHOLD = 0.5;
+const DEFAULT_ELIDE_THRESHOLD = 0.1;
+
+/** Minimal _meta for peripheral/elided tier — strip trajectory/provenance */
+function trimMeta(meta: any, elided: boolean, expandHint?: string): any {
+  const trimmed: any = {
+    score: meta.score,
+    revision: meta.revision,
+    updated_at: meta.updated_at,
+    elided,
+  };
+  if (elided && expandHint) {
+    trimmed.expand = expandHint;
+  }
+  return trimmed;
+}
+
+/** Check if a scope.key is in the expand list */
+function isExpanded(scope: string, key: string, expandSet: Set<string>): boolean {
+  return (
+    expandSet.has(`${scope}.${key}`) ||
+    expandSet.has(`${scope}.*`) ||
+    expandSet.has("*")
+  );
+}
+
+/**
+ * Shape a scope's entries by salience threshold.
  *
- * Returns a self-describing envelope with a `_context` section that tells the caller
- * what was included, what was elided, and how to expand elided sections. */
-export async function buildExpandedContext(roomId: string, auth: AuthResult, req: ContextRequest = {}): Promise<Record<string, any>> {
+ * Focus:      full value + full _meta
+ * Peripheral: full value + trimmed _meta (score, revision, updated_at)
+ * Elided:     value: null + trimmed _meta + expand hint
+ */
+function shapeScope(
+  scope: string,
+  entries: Record<string, WrappedEntry>,
+  focusThreshold: number,
+  elideThreshold: number,
+  expandSet: Set<string>,
+  noElision: boolean,
+): Record<string, any> {
+  const shaped: Record<string, any> = {};
+
+  for (const [key, entry] of Object.entries(entries)) {
+    const score = entry._meta?.score ?? 0;
+    const forceExpand = isExpanded(scope, key, expandSet);
+
+    if (forceExpand || noElision || score >= focusThreshold) {
+      // Focus tier: full value + full _meta
+      shaped[key] = entry;
+    } else if (score >= elideThreshold) {
+      // Peripheral tier: full value + trimmed _meta
+      shaped[key] = {
+        value: entry.value,
+        _meta: trimMeta(entry._meta, false),
+      };
+    } else {
+      // Elided tier: null value + minimal _meta + expand hint
+      shaped[key] = {
+        value: null,
+        _meta: trimMeta(
+          entry._meta,
+          true,
+          `?expand=${scope}.${key}`,
+        ),
+      };
+    }
+  }
+
+  return shaped;
+}
+
+// ── buildExpandedContext ─────────────────────────────────────────────────
+
+/**
+ * Build the agent-facing context response.
+ *
+ * v9: Returns wrapped { value, _meta } entries shaped by salience threshold.
+ * All metadata (salience, provenance, trajectory, contested) lives in _meta.
+ * No synthetic views, no _context envelope.
+ */
+export async function buildExpandedContext(
+  roomId: string,
+  auth: AuthResult,
+  req: ContextRequest = {},
+): Promise<Record<string, any>> {
   const depth = req.depth ?? "lean";
   const includeActions = req.actions !== false;
   const includeMessages = req.messages !== false;
   const includedScopes = req.include ?? [];
 
+  // Shaping params
+  const focusThreshold = req.focusThreshold ?? DEFAULT_FOCUS_THRESHOLD;
+  const elideThreshold = req.elideThreshold ?? DEFAULT_ELIDE_THRESHOLD;
+  const noElision = req.elision === "none";
+  const expandSet = new Set(req.expand ?? []);
+
+  // ── Engine layer: full wrapped context ──
   const ctx = await buildContext(roomId, {
     selfAgent: auth.agentId ?? undefined,
     allScopes: hasFullReadAccess(auth),
   });
 
-  // ---- Messages ----
-  let messagesSection: any;
-  let elided: string[] = [];
+  // ── Shape state scopes ──
+  const stateOut: Record<string, any> = {};
+  for (const [scope, entries] of Object.entries(ctx.state as Record<string, Record<string, WrappedEntry>>)) {
+    // Strip _audit and _messages unless opted in
+    if (scope === "_audit" && !includedScopes.includes("_audit")) continue;
+    if (scope === "_messages" && !includedScopes.includes("_messages")) continue;
+    // Skip system internals
+    if (scope === "_actions" || scope === "_views" || scope === "_agents" || scope === "_config" || scope === "_help") continue;
+
+    stateOut[scope] = shapeScope(
+      scope, entries, focusThreshold, elideThreshold, expandSet, noElision,
+    );
+  }
+
+  // ── Shape agents ──
+  const agentsOut: Record<string, any> = {};
+  for (const [id, entry] of Object.entries(ctx.agents as Record<string, WrappedEntry>)) {
+    // Agents are always focus tier (important for coordination)
+    agentsOut[id] = entry;
+  }
+
+  // ── Shape views ──
+  const viewsOut: Record<string, any> = {};
+  for (const [id, entry] of Object.entries(ctx.views as Record<string, WrappedEntry>)) {
+    const score = entry._meta?.score ?? 0;
+    if (noElision || score >= elideThreshold || isExpanded("_views", id, expandSet)) {
+      viewsOut[id] = score >= focusThreshold || noElision
+        ? entry
+        : { value: entry.value, _meta: trimMeta(entry._meta, false) };
+    } else {
+      viewsOut[id] = {
+        value: null,
+        _meta: trimMeta(entry._meta, true, `?expand=_views.${id}`),
+      };
+    }
+  }
+
+  // ── Actions ──
+  let actionsOut: Record<string, any> | undefined;
+
+  if (includeActions) {
+    actionsOut = {};
+
+    // Custom actions from engine context (already wrapped with action _meta)
+    for (const [id, entry] of Object.entries(ctx.actions as Record<string, WrappedEntry>)) {
+      const actionValue = entry.value;
+      const actionMeta = entry._meta as any;
+
+      const shaped: any = {
+        value: {
+          available: actionValue.available ?? true,
+          description: null as string | null,
+        },
+        _meta: actionMeta,
+      };
+
+      // Load full definition for description and depth-dependent fields
+      try {
+        const defResult = await sqlite.execute({
+          sql: `SELECT value FROM state WHERE room_id = ? AND scope = '_actions' AND key = ?`,
+          args: [roomId, id],
+        });
+        if (defResult.rows.length > 0) {
+          const def = JSON.parse(defResult.rows[0][0] as string);
+          shaped.value.description = def.description ?? null;
+
+          if (depth === "full" || depth === "usage") {
+            shaped.value.enabled = true;
+            if (def.params) shaped.value.params = def.params;
+            if (def.writes?.length > 0) shaped.value.writes = def.writes;
+            if (def.if) shaped.value.if = def.if;
+            if (def.scope && def.scope !== "_shared") shaped.value.scope = def.scope;
+          }
+        }
+      } catch {}
+
+      actionsOut[id] = shaped;
+    }
+
+    // Built-in actions (not in _actions scope — synthesize wrapped entries)
+    for (const [id, def] of Object.entries(BUILTIN_ACTIONS)) {
+      if (OVERRIDABLE_BUILTINS.has(id) && actionsOut[id]) continue;
+
+      const builtinValue: any = {
+        available: true,
+        builtin: true,
+        description: def.description,
+      };
+      if (depth === "full" || depth === "usage") {
+        builtinValue.enabled = true;
+        builtinValue.params = def.params ?? null;
+      }
+
+      actionsOut[id] = {
+        value: builtinValue,
+        _meta: {
+          ...minimalMeta(0, "", 0),
+          // Builtins have no audit trail — minimal meta
+          invocations: 0,
+          last_invoked_at: null,
+          last_invoked_by: null,
+          contested: [],
+        },
+      };
+    }
+  }
+
+  // ── Messages ──
+  let messagesOut: any;
+  let sectionElided: string[] = [];
 
   if (includeMessages) {
     const messagesLimit = Math.min(req.messagesLimit ?? 100, 500);
-    // Explicit column list — omits `version` to avoid INTEGER-affinity overflow on production
-    // databases where the v5→v6 migration silently failed (column already existed as INTEGER).
     let msgSql = `SELECT scope, key, sort_key, value, revision, updated_at,
                   timer_json, timer_expires_at, timer_ticks_left, timer_tick_on,
                   timer_effect, timer_started_at, enabled_expr
@@ -104,13 +328,18 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
     const msgResult = await sqlite.execute({ sql: msgSql, args: msgArgs });
     let msgRows = rows2objects(msgResult).filter((r: any) => isTimerLive(r));
     msgRows.reverse();
+
     const recentMessages = msgRows.map((r: any) => {
       let parsed: any = {};
-      try { parsed = JSON.parse(r.value); } catch { parsed = { body: r.value }; }
+      try {
+        parsed = JSON.parse(r.value);
+      } catch {
+        parsed = { body: r.value };
+      }
       return { seq: r.sort_key, ...parsed };
     });
 
-    // Update last_seen_seq in _agents scope
+    // Update last_seen_seq
     if (auth.agentId && recentMessages.length > 0) {
       const maxSeq = Math.max(...recentMessages.map((m: any) => m.seq ?? 0));
       if (maxSeq > 0) {
@@ -124,7 +353,7 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
       }
     }
 
-    // Count total messages (to detect elision)
+    // Count total for elision detection
     const totalMsgResult = await sqlite.execute({
       sql: `SELECT COUNT(*) as cnt FROM state WHERE room_id = ? AND scope = '_messages'`,
       args: [roomId],
@@ -132,127 +361,40 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
     const totalMessages = Number(rows2objects(totalMsgResult)[0]?.cnt ?? 0);
     const oldestSeq = recentMessages.length > 0 ? (recentMessages[0].seq ?? 0) : 0;
 
-    const directed_unread = ctx.messages.directed_unread ?? 0;
-
-    messagesSection = {
+    messagesOut = {
       count: ctx.messages.count,
       unread: ctx.messages.unread,
-      directed_unread,
+      directed_unread: ctx.messages.directed_unread,
       recent: recentMessages,
     };
 
-    // Mark elision if we have more messages than we returned
     if (totalMessages > messagesLimit) {
-      const missing = totalMessages - recentMessages.length;
-      messagesSection._elided = {
+      messagesOut._meta = {
         total: totalMessages,
         returned: recentMessages.length,
-        missing,
-        oldest_seq: oldestSeq,
-        _expand: `?messages_after=0&messages_limit=${Math.min(totalMessages, 500)}`,
+        elided: true,
+        expand: `?messages_after=0&messages_limit=${Math.min(totalMessages, 500)}`,
       };
     }
   } else {
-    elided.push("messages");
+    sectionElided.push("messages");
   }
 
-  // ---- Actions ----
-  let actionsSection: Record<string, any> | undefined;
-
-  if (includeActions) {
-    // v8: Read action definitions from _actions scope in state table
-    const actionScopeResult = await sqlite.execute({
-      sql: `SELECT key, value FROM state WHERE room_id = ? AND scope = '_actions'`,
-      args: [roomId],
-    });
-    const actionEntries = rows2objects(actionScopeResult) as any[];
-
-    // Invocation counts for "usage" depth
-    let invocationCounts: Record<string, number> = {};
-    if (depth === "usage") {
-      const auditResult = await sqlite.execute({
-        sql: `SELECT value FROM state WHERE room_id = ? AND scope = '_audit' ORDER BY sort_key DESC LIMIT 500`,
-        args: [roomId],
-      });
-      for (const row of rows2objects(auditResult)) {
-        try {
-          const entry = JSON.parse((row as any).value);
-          if (entry.action && !entry.builtin) {
-            invocationCounts[entry.action] = (invocationCounts[entry.action] ?? 0) + 1;
-          }
-        } catch {}
-      }
-    }
-
-    actionsSection = {};
-    for (const row of actionEntries) {
-      let def: any;
-      try { def = typeof row.value === "string" ? JSON.parse(row.value) : row.value; } catch { continue; }
-      const id = row.key;
-
-      // Check enabled
-      if (def.enabled) {
-        try { if (!evaluate(def.enabled, ctx)) continue; } catch { continue; }
-      }
-
-      // lean: just available + description
-      const entry: any = {
-        available: true,
-        description: def.description ?? null,
-      };
-
-      if (def.if) {
-        try { entry.available = !!evaluate(def.if, ctx); } catch { entry.available = false; }
-      }
-
-      if (depth === "full" || depth === "usage") {
-        entry.enabled = true;
-        if (def.params) entry.params = def.params;
-        if (def.writes?.length > 0) entry.writes = def.writes;
-        if (def.if) entry.if = def.if;
-        if (def.scope && def.scope !== "_shared") entry.scope = def.scope;
-      }
-
-      if (depth === "usage") {
-        entry.invocation_count = invocationCounts[id] ?? 0;
-      }
-
-      actionsSection[id] = entry;
-    }
-
-    // Add built-in actions (skip overridable ones that have a custom registration)
-    for (const [id, def] of Object.entries(BUILTIN_ACTIONS)) {
-      if (OVERRIDABLE_BUILTINS.has(id) && actionsSection[id]) continue;
-      const builtinEntry: any = {
-        available: true,
-        builtin: true,
-        description: def.description,
-      };
-      if (depth === "full" || depth === "usage") {
-        builtinEntry.enabled = true;
-        builtinEntry.params = def.params ?? null;
-      }
-      actionsSection[id] = builtinEntry;
-    }
-  } else {
-    elided.push("actions");
+  if (!includeActions) {
+    sectionElided.push("actions");
   }
 
-  // ---- Assemble state, stripping _audit / _messages unless opted in ----
-  const stateOut = { ...ctx.state };
-  if (!includedScopes.includes("_audit")) delete stateOut._audit;
-  if (!includedScopes.includes("_messages")) delete stateOut._messages;
-
-  // ---- Apply `only` filter ----
+  // ── Assemble response ──
   let result: Record<string, any> = {
     state: stateOut,
-    views: ctx.views,
-    agents: ctx.agents,
-    ...(actionsSection !== undefined ? { actions: actionsSection } : {}),
-    ...(messagesSection !== undefined ? { messages: messagesSection } : {}),
+    views: viewsOut,
+    agents: agentsOut,
+    ...(actionsOut !== undefined ? { actions: actionsOut } : {}),
+    ...(messagesOut !== undefined ? { messages: messagesOut } : {}),
     self: ctx.self,
   };
 
+  // ── Apply `only` filter ──
   if (req.only && req.only.length > 0) {
     const filtered: Record<string, any> = {};
     for (const s of req.only) {
@@ -260,124 +402,77 @@ export async function buildExpandedContext(roomId: string, auth: AuthResult, req
       if (s.startsWith("state.")) {
         const scope = s.slice(6);
         if (!filtered.state) filtered.state = {};
-        filtered.state[scope] = ctx.state?.[scope] ?? {};
+        if (ctx.state[scope]) {
+          filtered.state[scope] = shapeScope(
+            scope, ctx.state[scope], focusThreshold, elideThreshold, expandSet, noElision,
+          );
+        }
       }
     }
-    // self always included
     if (result.self) filtered.self = result.self;
-    // track what was filtered out
     for (const key of Object.keys(result)) {
-      if (!(key in filtered) && key !== "self") elided.push(key);
+      if (!(key in filtered) && key !== "self") sectionElided.push(key);
     }
     result = filtered;
   }
 
-  // ---- _contested synthetic view ----
-  const contestedTargets = await computeContestedTargets(roomId);
-  const hasContested = Object.keys(contestedTargets).length > 0;
-  if (hasContested) {
-    result.views = {
-      ...result.views,
-      _contested: {
-        value: contestedTargets,
-        description: "Write targets contested by 2+ actions. Keys are scope:key, values are lists of competing action IDs.",
-        system: true,
-      },
-    };
-  }
-
-  // ---- v8: _salience synthetic view (agent-specific) ----
-  if (auth.authenticated && auth.agentId) {
-    try {
-      const salienceMap = await computeSalience(roomId, auth.agentId, {
-        contestedTargets,
-        limit: 20,
-      });
-      // Inject as a lightweight summary — full map available at /salience endpoint
-      const topKeys = salienceMap.entries.slice(0, 10).map(e => ({
-        key: `${e.scope}.${e.key}`,
-        score: Math.round(e.score * 100) / 100,
-        why: Object.entries(e.signals)
-          .filter(([_, v]) => v > 0.1)
-          .sort((a, b) => b[1] - a[1])
-          .map(([k]) => k),
-      }));
-      if (topKeys.length > 0) {
-        result.views = {
-          ...result.views,
-          _salience: {
-            value: topKeys,
-            description: "Top salient state keys for this agent. Score = weighted sum of recency, dependency, authorship, directed, contest, delta signals. Full map at GET /salience.",
-            system: true,
-          },
-        };
-      }
-    } catch { /* salience is best-effort */ }
-  }
-
-  // ---- _context envelope ----
-  // Compute situational help keys — which help topics are currently relevant
-  const contextHelp: string[] = [];
-  // Empty room (no registered actions beyond builtins): suggest vocabulary_bootstrap
-  const customActionCount = actionsSection
-    ? Object.keys(actionsSection).filter(k => !BUILTIN_ACTIONS[k]).length
-    : 0;
-  if (customActionCount === 0) {
-    contextHelp.push("vocabulary_bootstrap");
-  }
-  // Directed unread: suggest directed_messages
-  if (messagesSection?.directed_unread > 0) {
-    contextHelp.push("directed_messages");
-  }
-  // Contested actions: suggest contested_actions
-  if (hasContested) {
-    contextHelp.push("contested_actions");
-  }
-  // Messages truncated: surface at top-level _context so agents don't miss it
-  if (messagesSection?._elided) {
-    contextHelp.push("context_shaping");
-  }
-
-  result._context = {
-    sections: Object.keys(result).filter(k => k !== "_context"),
-    depth,
-    ...(messagesSection?._elided ? {
-      messages_truncated: {
-        missing: messagesSection._elided.missing,
-        oldest_seq: messagesSection._elided.oldest_seq,
-        _expand: messagesSection._elided._expand,
-      },
-    } : {}),
-    ...(contextHelp.length > 0 ? { help: contextHelp } : {}),
-    ...(elided.length > 0 ? {
-      elided,
-      _expand: elided.map(s => {
-        if (s === "messages") return `?messages=true`;
-        if (s === "actions") return `?actions=true`;
-        return `?only=${s}`;
-      }),
-    } : {}),
-    request: {
-      ...(req.depth ? { depth: req.depth } : {}),
-      ...(req.only ? { only: req.only } : {}),
-      ...(req.actions === false ? { actions: false } : {}),
-      ...(req.messages === false ? { messages: false } : {}),
-      ...(req.messagesAfter ? { messages_after: req.messagesAfter } : {}),
-      ...(req.messagesLimit ? { messages_limit: req.messagesLimit } : {}),
-    },
+  // ── Shaping summary ──
+  // Minimal envelope — just enough for the agent to understand what it got
+  const shapingSummary: any = {
+    focus_threshold: focusThreshold,
+    elide_threshold: elideThreshold,
+    elision: noElision ? "none" : "auto",
   };
+
+  // Count shaped entries
+  let focusCount = 0;
+  let peripheralCount = 0;
+  let elidedCount = 0;
+  for (const scope of Object.values(stateOut)) {
+    for (const entry of Object.values(scope as Record<string, any>)) {
+      const e = entry as any;
+      if (e?._meta?.elided) elidedCount++;
+      else if (e?._meta?.score !== undefined && !e?._meta?.writers) peripheralCount++;
+      else focusCount++;
+    }
+  }
+  shapingSummary.state_entries = {
+    focus: focusCount,
+    peripheral: peripheralCount,
+    elided: elidedCount,
+    total: focusCount + peripheralCount + elidedCount,
+  };
+
+  if (sectionElided.length > 0) {
+    shapingSummary.sections_elided = sectionElided;
+  }
+
+  result._shaping = shapingSummary;
 
   return result;
 }
 
-// ── CEL eval endpoint ──
+// ── CEL eval endpoint ───────────────────────────────────────────────────
 
-export async function evalExpression(roomId: string, body: any, auth: AuthResult) {
+export async function evalExpression(
+  roomId: string,
+  body: any,
+  auth: AuthResult,
+) {
   const expr = body.expr;
-  if (!expr || typeof expr !== "string") return json({ error: "expr string is required" }, 400);
+  if (!expr || typeof expr !== "string") {
+    return json({ error: "expr string is required" }, 400);
+  }
   touchAgent(roomId, auth.agentId);
-  const ctx = await buildContext(roomId, { selfAgent: auth.agentId ?? undefined });
+  const ctx = await buildContext(roomId, {
+    selfAgent: auth.agentId ?? undefined,
+  });
   const result = await evalCel(roomId, expr, ctx);
-  if (!result.ok) return json({ error: "cel_error", expression: expr, detail: result.error }, 400);
+  if (!result.ok) {
+    return json(
+      { error: "cel_error", expression: expr, detail: result.error },
+      400,
+    );
+  }
   return json({ expression: expr, value: result.value });
 }

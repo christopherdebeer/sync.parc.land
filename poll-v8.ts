@@ -1,29 +1,23 @@
 /**
- * poll-v8.ts — State-only dashboard poll. Clean break from legacy tables.
+ * poll.ts — Dashboard poll endpoint (v9).
  *
- * One data source: the state table. Actions, views, agents, messages
- * are all state with scope prefixes. The frontend interprets scopes,
- * not separate data structures.
+ * Single data source: the state table. Returns state rows with _meta
+ * (writer, score, velocity), resolved view values, action availability,
+ * audit trail, and salience map.
  *
- * Returns:
- *   state      — all state rows (every scope except _audit)
- *   resolved   — server-evaluated view values (CEL runs here, not in browser)
- *   available  — server-evaluated action predicates
- *   audit      — audit trail entries
- *   salience   — agent-specific relevance scores (if agent-authenticated)
+ * v9: Every state row includes _meta from meta.ts.
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";
-import { evaluate } from "npm:@marcbachmann/cel-js";
 import { json, rows2objects } from "./utils.ts";
-import { buildContext, buildViewContext } from "./cel.ts";
+import { buildContext, buildViewContext, celEval } from "./cel.ts";
 import { isTimerLive } from "./timers.ts";
 import { hasFullReadAccess, touchAgent, type AuthResult } from "./auth.ts";
 import { computeContestedTargets } from "./actions.ts";
 import { maybeSampleViews } from "./sampling.ts";
-import { computeSalience } from "./salience.ts";
+import { computeRoomMeta, computeScore, wrapEntry, loadAgentContext, type RoomMeta } from "./meta.ts";
 
-export async function dashboardPollV8(roomId: string, url: URL, auth: AuthResult) {
+export async function dashboardPoll(roomId: string, url: URL, auth: AuthResult) {
   const auditLimit = Math.min(parseInt(url.searchParams.get("audit_limit") ?? "500"), 2000);
 
   // ── Single state query: everything except _audit ──
@@ -35,11 +29,11 @@ export async function dashboardPollV8(roomId: string, url: URL, auth: AuthResult
   if (!hasFullReadAccess(auth)) {
     if (auth.authenticated && auth.kind === "agent") {
       const accessible = [auth.agentId!, ...auth.grants].filter(Boolean);
-      const conditions = [`scope LIKE '\\_%' ESCAPE '\\'`]; // all system scopes
+      const conditions = [`scope LIKE '\\_%' ESCAPE '\\'`];
       for (const s of accessible) { conditions.push(`scope = ?`); stateArgs.push(s); }
       stateSql += ` AND (${conditions.join(" OR ")})`;
     } else {
-      stateSql += ` AND scope LIKE '\\_%' ESCAPE '\\'`; // system scopes only
+      stateSql += ` AND scope LIKE '\\_%' ESCAPE '\\'`;
     }
   }
 
@@ -55,7 +49,17 @@ export async function dashboardPollV8(roomId: string, url: URL, auth: AuthResult
     }),
   ]);
 
-  // ── Process state rows ──
+  // ── Compute room meta for _meta enrichment ──
+  let roomMeta: RoomMeta | null = null;
+  let agentCtx: any = null;
+  try {
+    roomMeta = await computeRoomMeta(roomId);
+    if (auth.agentId) {
+      agentCtx = await loadAgentContext(roomId, auth.agentId, rows2objects(stateResult) as any[]);
+    }
+  } catch {}
+
+  // ── Process state rows with _meta ──
   const rawRows = rows2objects(stateResult);
   const stateRows: any[] = [];
 
@@ -63,6 +67,15 @@ export async function dashboardPollV8(roomId: string, url: URL, auth: AuthResult
     if (!isTimerLive(row)) continue;
     let value: any = row.value;
     try { value = JSON.parse(row.value); } catch {}
+
+    // Compute _meta for this entry
+    let _meta: any = null;
+    if (roomMeta) {
+      const score = computeScore(row.scope as string, row.key as string, row.updated_at as string, value, agentCtx, roomMeta);
+      const wrapped = wrapEntry(value, row.scope as string, row.key as string, row.revision ?? 0, row.updated_at ?? "", roomMeta, score);
+      _meta = wrapped._meta;
+    }
+
     stateRows.push({
       scope: row.scope,
       key: row.key,
@@ -70,6 +83,7 @@ export async function dashboardPollV8(roomId: string, url: URL, auth: AuthResult
       value,
       revision: row.revision,
       updated_at: row.updated_at,
+      _meta,
     });
   }
 
@@ -87,15 +101,13 @@ export async function dashboardPollV8(roomId: string, url: URL, auth: AuthResult
     const def = v.value;
     if (!def?.expr) continue;
 
-    // Check enabled
     if (def.enabled) {
-      try { if (!evaluate(def.enabled, ctx)) continue; } catch { continue; }
+      try { if (!celEval(def.enabled, ctx)) continue; } catch { continue; }
     }
 
-    // Evaluate
     const viewCtx = await buildViewContext(roomId, def.scope ?? "_shared", ctx);
     try {
-      const result = evaluate(def.expr, viewCtx);
+      const result = celEval(def.expr, viewCtx);
       resolved[v.key] = typeof result === "bigint" ? Number(result) : result;
     } catch (e: any) {
       resolved[v.key] = { _error: e.message };
@@ -108,13 +120,11 @@ export async function dashboardPollV8(roomId: string, url: URL, auth: AuthResult
 
   for (const a of actionDefs) {
     const def = a.value;
-    // Check enabled
     if (def?.enabled) {
-      try { if (!evaluate(def.enabled, ctx)) continue; } catch { continue; }
+      try { if (!celEval(def.enabled, ctx)) continue; } catch { continue; }
     }
-    // Check if precondition
     if (def?.if) {
-      try { available[a.key] = !!evaluate(def.if, ctx); } catch { available[a.key] = false; }
+      try { available[a.key] = !!celEval(def.if, ctx); } catch { available[a.key] = false; }
     } else {
       available[a.key] = true;
     }
@@ -138,19 +148,12 @@ export async function dashboardPollV8(roomId: string, url: URL, auth: AuthResult
   if (auth.authenticated && auth.agentId) {
     touchAgent(roomId, auth.agentId);
     try {
-      const contestedTargets = await computeContestedTargets(roomId);
-      const map = await computeSalience(roomId, auth.agentId, {
-        contestedTargets,
-        limit: 20,
-      });
-      salience = map.entries.map(e => ({
-        key: `${e.scope}.${e.key}`,
-        score: Math.round(e.score * 100) / 100,
-        signals: Object.entries(e.signals)
-          .filter(([_, v]) => v > 0.05)
-          .sort((a, b) => b[1] - a[1])
-          .map(([k]) => k),
-      }));
+      salience = stateRows
+        .filter((r: any) => !r.scope.startsWith("_") || r.scope === "_shared")
+        .filter((r: any) => r._meta && r._meta.score > 0.05)
+        .map((r: any) => ({ key: `${r.scope}.${r.key}`, score: Math.round(r._meta.score * 100) / 100 }))
+        .sort((a: any, b: any) => b.score - a.score)
+        .slice(0, 20);
     } catch {}
   }
 

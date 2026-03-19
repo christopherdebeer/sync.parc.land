@@ -6,11 +6,11 @@
  */
 
 import { sqlite } from "https://esm.town/v/std/sqlite";
-import { evaluate } from "npm:@marcbachmann/cel-js";
 import {
   json, rows2objects, contentHash, deepSubstitute, deepMerge,
 } from "./utils.ts";
-import { buildContext, evalCelWithParams, buildViewContext, type BuildContextOptions } from "./cel.ts";
+import { buildContext, celEval, evalCelWithParams, buildViewContext, type BuildContextOptions } from "./cel.ts";
+import { computeRoomMeta, computeScore, wrapEntry, loadAgentContext, type RoomMeta } from "./meta.ts";
 import { isTimerLive, getTimerStatus, parseTimer, tickLogicalTimers, validateTimer } from "./timers.ts";
 import { touchAgent, type AuthResult } from "./auth.ts";
 import { appendAuditEntry, appendStructuralEvent } from "./audit.ts";
@@ -147,7 +147,7 @@ export async function invokeAction(roomId: string, actionId: string, body: any, 
   // Check enabled
   if (action.enabled_expr) {
     try {
-      if (!evaluate(action.enabled_expr, ctx)) return json({ error: "action_disabled", id: actionId }, 409);
+      if (!celEval(action.enabled_expr, ctx)) return json({ error: "action_disabled", id: actionId }, 409);
     } catch (e: any) { return json({ error: "cel_error", field: "enabled", detail: e.message }, 400); }
   }
 
@@ -459,7 +459,47 @@ export async function invokeAction(roomId: string, actionId: string, body: any, 
     }
   }
 
-  const response: any = { invoked: true, action: actionId, agent, params, writes: executedWrites };
+  // v9: Build wrapped entries for written keys
+  // The agent sees _meta (provenance, score, velocity) for each key it just affected
+  let wrappedWrites: any[] | undefined;
+  try {
+    const roomMeta = await computeRoomMeta(roomId);
+    const postStateRows = await sqlite.execute({
+      sql: `SELECT scope, key, value, revision, updated_at FROM state WHERE room_id = ?`,
+      args: [roomId],
+    });
+    const postRows = rows2objects(postStateRows) as any[];
+    let postAgentCtx = null;
+    if (agent) {
+      postAgentCtx = await loadAgentContext(roomId, agent, postRows);
+    }
+
+    wrappedWrites = [];
+    for (const w of executedWrites) {
+      const row = postRows.find((r: any) => r.scope === w.scope && r.key === w.key);
+      if (row) {
+        let val: any;
+        try { val = JSON.parse(row.value); } catch { val = row.value; }
+        const score = computeScore(w.scope, w.key, row.updated_at, val, postAgentCtx, roomMeta);
+        const wrapped = wrapEntry(val, w.scope, w.key, row.revision ?? 0, row.updated_at ?? "", roomMeta, score);
+        // Override writer/via — the audit entry for this invoke hasn't been scanned yet,
+        // so roomMeta still shows the *previous* writer. We know the current one.
+        wrapped._meta.writer = agent ?? wrapped._meta.writer;
+        wrapped._meta.via = actionId;
+        if (agent && !wrapped._meta.writers.includes(agent)) {
+          wrapped._meta.writers = [agent, ...wrapped._meta.writers];
+        }
+        wrappedWrites.push({ scope: w.scope, key: w.key, ...wrapped });
+      } else {
+        wrappedWrites.push(w);
+      }
+    }
+  } catch {
+    // Fallback to unwrapped writes if meta computation fails
+    wrappedWrites = executedWrites;
+  }
+
+  const response: any = { invoked: true, action: actionId, agent, params, writes: wrappedWrites ?? executedWrites };
   if (result !== undefined) response.result = result;
   return json(response);
 }

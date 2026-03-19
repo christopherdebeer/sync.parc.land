@@ -1,4 +1,23 @@
-// ── v8 types: state is the single source ────────────────────────────────────
+// ── v9 types: state entries include _meta ────────────────────────────────────
+
+/** v9 entry metadata — provenance, trajectory, salience */
+export interface EntryMeta {
+  revision: number;
+  updated_at: string;
+  writer: string | null;
+  via: string | null;
+  seq: number | null;
+  score: number;
+  velocity: number;
+  writers: string[];
+  first_at: string | null;
+  elided: boolean;
+  // Action-specific fields
+  invocations?: number;
+  last_invoked_at?: string | null;
+  last_invoked_by?: string | null;
+  contested?: string[];
+}
 
 /** A single entry in the state table. Every entity lives here. */
 export interface StateEntry {
@@ -8,6 +27,8 @@ export interface StateEntry {
   value: any;
   revision: number;
   updated_at: string;
+  /** v9: provenance, trajectory, salience metadata */
+  _meta?: EntryMeta | null;
 }
 
 /** Action definition (value of _actions.{id} state entry) */
@@ -80,12 +101,13 @@ export function allScopes(poll: PollDataV8): string[] {
   return [...s].sort();
 }
 
-/** Helper: extract action defs with availability */
-export function actionsFromState(poll: PollDataV8): Array<{ id: string; def: ActionDef; available: boolean }> {
+/** Helper: extract action defs with availability and _meta */
+export function actionsFromState(poll: PollDataV8): Array<{ id: string; def: ActionDef; available: boolean; _meta?: EntryMeta | null }> {
   return scopeEntries(poll, "_actions").map(e => ({
     id: e.key,
     def: e.value as ActionDef,
     available: poll.available[e.key] ?? true,
+    _meta: e._meta ?? null,
   }));
 }
 
@@ -141,6 +163,8 @@ export interface StateRow {
   timer_expires_at?: string;
   timer_ticks_left?: number;
   enabled_expr?: string;
+  /** v9: entry metadata from poll */
+  _meta?: EntryMeta | null;
 }
 
 export interface RawMessage {
@@ -160,6 +184,8 @@ export interface Action {
   writes?: any[];
   version: number;
   registered_by?: string;
+  /** v9: invocations, contested, etc. */
+  _meta?: EntryMeta | null;
 }
 
 export interface RenderHintColumn {

@@ -1,16 +1,18 @@
 /**
- * help-content.ts — Standard library action definitions and help system content.
+ * help-content.ts — v9 help system.
  *
  * Pure data constants. No runtime dependencies.
  *
- * STANDARD_LIBRARY: canonical action definitions agents register from help({ key: "standard_library" }).
+ * STANDARD_LIBRARY: canonical action definitions for room bootstrapping.
  * HELP_SYSTEM: keyed guidance namespace served by the help action.
+ *
+ * v9: Updated for wrapped state model { value, _meta }.
+ * All CEL expressions use .value for data access, ._meta for metadata.
+ * New help keys: expressions, shaping, functions, wrapped_entries.
  */
 
-/** Standard library — canonical action definitions agents can register directly.
- *  Returned by help({ key: "standard_library" }) as a JSON array.
- *  Agents bootstrap a room by reading this, picking what they need, and calling
- *  _register_action with each definition. */
+/** Standard library — canonical action definitions agents can register.
+ *  v9: CEL expressions updated for { value, _meta } wrapped shape. */
 export const STANDARD_LIBRARY: any[] = [
   {
     id: "set",
@@ -49,7 +51,7 @@ export const STANDARD_LIBRARY: any[] = [
   },
   {
     id: "update_objective",
-    description: "Write or update your objective in your own scope (visible via objective view)",
+    description: "Write or update your objective in your own scope",
     params: {
       objective: { type: "string", description: "Your current objective" },
       status: { type: "string", description: "Current status (optional)" },
@@ -60,25 +62,17 @@ export const STANDARD_LIBRARY: any[] = [
     ],
   },
   {
-    id: "update_status",
-    description: "Write your current status to your own scope",
-    params: {
-      status: { type: "string", description: "Status string" },
-    },
-    writes: [{ scope: "${self}", key: "status", value: "${params.status}" }],
-  },
-  {
     id: "claim",
     description: "Claim an unclaimed slot in shared state (fails if already claimed)",
     params: {
       key: { type: "string", description: "Slot key" },
     },
-    if: '!(params.key in state["_shared"]) || state["_shared"][params.key] == null || state["_shared"][params.key] == ""',
+    if: '!has(state._shared[params.key]) || state._shared[params.key].value == null',
     writes: [{ scope: "_shared", key: "${params.key}", value: "${self}" }],
   },
   {
     id: "submit_result",
-    description: "Submit a typed result keyed to your identity (idempotent — overwrites previous submission)",
+    description: "Submit a typed result keyed to your identity (idempotent)",
     params: {
       result: { description: "Your result (any type)" },
     },
@@ -98,24 +92,11 @@ export const STANDARD_LIBRARY: any[] = [
     writes: [{ scope: "${self}", key: "vote", value: "${params.choice}" }],
   },
   {
-    id: "publish_view",
-    description: "Register a view that makes a private key visible to everyone",
-    params: {
-      key: { type: "string", description: "Key in your own scope to expose" },
-      label: { type: "string", description: "Human-readable label" },
-    },
-    writes: [],
-    _note: "Register this action then invoke _register_view with scope=self and expr referencing your scope key.",
-  },
-  // ── Role management (agency-and-identity pattern) ──
-  {
     id: "define_role",
-    description: "Declare a role this room needs filled. The role_id becomes the agent ID when filled.",
+    description: "Declare a role this room needs filled",
     params: {
       role_id: { type: "string", description: "Role identifier (becomes agent ID when filled)" },
       description: { type: "string", description: "What this role does" },
-      bootstrap_actions: { type: "array", description: "Action IDs this role should register on fill" },
-      bootstrap_views: { type: "array", description: "View IDs this role should register on fill" },
     },
     writes: [{
       scope: "_shared",
@@ -129,11 +110,11 @@ export const STANDARD_LIBRARY: any[] = [
   },
   {
     id: "fill_role",
-    description: "Claim a role in this room (sets filled_by to your agent ID)",
+    description: "Claim a role in this room",
     params: {
       role_id: { type: "string", description: "Role to fill" },
     },
-    if: 'has(state["_shared"], "roles." + params.role_id)',
+    if: 'has(state._shared["roles." + params.role_id])',
     writes: [{
       scope: "_shared",
       key: "roles.${params.role_id}",
@@ -141,293 +122,459 @@ export const STANDARD_LIBRARY: any[] = [
     }],
   },
   {
-    id: "vacate_role",
-    description: "Release a role you are filling",
+    id: "gate_on_stability",
+    description: "Example: an action only available when no shared keys are being rapidly written",
     params: {
-      role_id: { type: "string", description: "Role to vacate" },
+      key: { type: "string", description: "Key to write" },
+      value: { description: "Value to write" },
     },
-    if: 'has(state["_shared"], "roles." + params.role_id) && state["_shared"]["roles." + params.role_id].filled_by == self',
-    writes: [{
-      scope: "_shared",
-      key: "roles.${params.role_id}",
-      merge: { filled_by: null, vacated_at: "${now}" },
-    }],
+    if: 'size(velocity_above(state._shared, 0.3)) == 0',
+    writes: [{ scope: "_shared", key: "${params.key}", value: "params.value", expr: true }],
   },
-
+  {
+    id: "gate_on_writer",
+    description: "Example: only invoke if the target key was NOT last written by you",
+    params: {
+      key: { type: "string", description: "Key to refine" },
+      value: { description: "New value" },
+    },
+    if: 'state._shared[params.key]._meta.writer != self',
+    writes: [{ scope: "_shared", key: "${params.key}", value: "params.value", expr: true }],
+  },
 ];
 
-/** System default help content — keyed namespace.
- *  Room overrides: write to _help scope with the same key.
- *  Resolution: room state wins, system default is fallback. */
+/** Help keys that validation errors can reference.
+ *  Used by validateExpression and registerAction/registerView responses. */
+export const HELP_KEYS = {
+  EXPR_SYNTAX: "expressions",
+  EXPR_WRAPPED: "wrapped_entries",
+  EXPR_FUNCTIONS: "functions",
+  SHAPING: "shaping",
+  CONTEST: "contested_actions",
+  BOOTSTRAP: "vocabulary_bootstrap",
+  MESSAGES: "directed_messages",
+  IF_VERSION: "if_version",
+} as const;
+
+/** System default help content — keyed namespace. */
 export const HELP_SYSTEM: Record<string, string> = {
   index: JSON.stringify({
-    description: "sync v6 help system — keyed guidance namespace",
+    description: "sync v9 help system",
     keys: {
-      guide: "Participant guide — the read/act rhythm, axioms, built-in actions",
-      standard_library: "Ready-to-register action definitions covering common patterns",
+      guide: "Participant guide — read/act rhythm, axioms, built-in actions",
+      expressions: "CEL expression guide — .value, ._meta, domain helpers, common patterns",
+      wrapped_entries: "The { value, _meta } entry shape — why and how",
+      functions: "Domain helper function reference — salient(), elided(), written_by(), etc.",
+      shaping: "Context shaping — elision, expand, thresholds",
+      standard_library: "Ready-to-register action definitions",
       vocabulary_bootstrap: "How to establish room vocabulary from an empty room",
       contested_actions: "What to do when two agents write to the same state key",
-      directed_messages: "How to send and wait for attention-routed messages",
-      context_shaping: "How to use ContextRequest to control context size and depth",
+      directed_messages: "Attention-routed messages",
       if_version: "Proof-of-read versioning for safe concurrent writes",
     },
   }),
 
-  guide: `# sync v6 — participant guide
+  guide: `# sync v9 — participant guide
 
-You interact with this room using two operations: **read context** and **invoke actions**.
+Two operations: **read context** and **invoke actions**.
 
 ## The rhythm
 
-\`\`\`
-read  →  evaluate  →  act  →  read  →  ...
-\`\`\`
+  read → evaluate → act → read → ...
 
-\`GET /rooms/{room}/context\` — read everything you can see.
-\`POST /rooms/{room}/actions/{id}/invoke\` — act on what you see.
-\`GET /rooms/{room}/wait?condition={cel}\` — block until something worth reading.
+sync_read_context({ room }) — read the room as { value, _meta } entries.
+sync_invoke_action({ room, action, params }) — act on what you see.
+sync_wait({ room, condition }) — block until a CEL condition is true.
 
 ## The axioms
 
-Every room starts with four actions:
+Every room starts with: _register_action, _register_view, _send_message, help.
+There is no _set_state. Register an action, then invoke it.
 
-| Action | Purpose |
-|--------|---------|
-| \`_register_action\` | Declare a write capability |
-| \`_register_view\` | Declare a read capability |
-| \`_send_message\` | Send a message to the room |
-| \`help\` | Read this guide and standard library |
+## Entry shape (v9)
 
-There is no \`_set_state\`. Direct writes bypass the constraint. Register an action,
-then invoke it. The registration is the commitment.
+Every state entry is { value, _meta }:
+  state._shared.phase.value           → "executing"
+  state._shared.phase._meta.writer    → "architect"
+  state._shared.phase._meta.score     → 0.85
+  state._shared.phase._meta.velocity  → 0.1
 
-## Your first move in an empty room
+Use .value for the data. Use ._meta for provenance, trajectory, salience.
+See help({ key: "expressions" }) for the full CEL guide.
 
-1. Read \`help({ key: "standard_library" })\` — pick the patterns you need
-2. Register them with \`_register_action\`
-3. Register views that make your state visible with \`_register_view\`
-4. Invoke your registered actions to write state
+## Shaping
 
-Your action registrations are your thesis about what this room is for.
+Context is shaped by salience. High-score entries get full values and metadata.
+Low-score entries are elided (value: null, _meta.expand tells you how to get them).
+Override: sync_read_context({ room, elision: "none" }) to see everything.
+See help({ key: "shaping" }) for details.
 
-## Context shaping
+## First move in an empty room
 
-\`\`\`
-GET /context?depth=lean          # available + description only (default)
-GET /context?depth=full          # + writes, params, if conditions
-GET /context?depth=usage         # + invocation counts from audit
-GET /context?only=actions        # just the actions section
-GET /context?messages=false      # skip messages (faster)
-GET /context?messages_after=42   # only messages after seq 42
-\`\`\`
+1. help({ key: "standard_library" }) — pick patterns you need
+2. _register_action — register them
+3. _register_view — make your state visible
+4. Invoke your actions to write state
 
 ## Reference
 
-- \`help({ key: "standard_library" })\` — ready-to-register action templates
-- \`help({ key: "vocabulary_bootstrap" })\` — bootstrapping a room from scratch
-- \`GET /reference/api.md\` — full API reference
-- \`GET /reference/cel.md\` — CEL expression reference
-- \`GET /reference/v6.md\` — architecture and design decisions
+help({ key: "expressions" }) — CEL expression guide
+help({ key: "functions" }) — domain helper reference
+help({ key: "shaping" }) — context shaping
+help({ key: "standard_library" }) — action templates
+`,
+
+  expressions: `# CEL expressions in v9
+
+Every state entry is wrapped: { value, _meta: { ... } }.
+CEL expressions in views, action if/enabled gates, and result expressions
+all operate on this wrapped shape.
+
+## Value access
+
+  state._shared.phase.value == "executing"
+  state._shared.turn.value > 2
+  state._shared["concepts.substrate"].value.name == "substrate"
+
+One .value per key, always at the same depth. Everything inside .value is raw.
+
+## Meta access
+
+  state._shared.phase._meta.writer == self
+  state._shared.phase._meta.revision > 5
+  state._shared.phase._meta.velocity > 0.3
+  state._shared.phase._meta.score > 0.5
+
+Available _meta fields: revision, updated_at, writer, via, seq, score,
+velocity, writers (list), first_at, elided.
+Action _meta adds: invocations, last_invoked_at, last_invoked_by, contested.
+
+## Shorthand functions
+
+  val(state._shared.phase) == "executing"     → extracts .value
+  meta(state._shared.phase, "writer")         → extracts ._meta field
+
+## Collection queries
+
+Map macros iterate keys. Access values via re-lookup:
+
+  state._shared.exists(k, state._shared[k]._meta.writer == "explorer")
+  state._shared.filter(k, k.startsWith("concepts"))
+  state._shared.map(k, k.startsWith("concepts"), state._shared[k]._meta.writer)
+
+Or use .keys()/.entries() for list operations:
+
+  state._shared.keys().filter(k, state._shared[k]._meta.score > 0.5)
+  state._shared.entries().filter(e, e.entry._meta.writer != null).map(e, e.key)
+
+## Domain helpers
+
+  salient(state._shared, 0.5)            → keys above score threshold
+  elided(state._shared)                  → keys with elided values
+  written_by(state._shared, self)        → keys you last wrote
+  focus(state._shared)                   → high-tier keys
+  velocity_above(state._shared, 0.3)     → keys being actively written
+  contested(actions)                     → actions with shared write targets
+  top_n(state._shared, 5)               → top 5 keys by score
+
+See help({ key: "functions" }) for full reference.
+
+## Common mistakes
+
+WRONG: state._shared.phase == "executing"       → compares wrapped entry to string (always false)
+RIGHT: state._shared.phase.value == "executing"  → compares the value
+
+WRONG: state._shared["concepts.substrate"].name  → "name" not found on wrapped entry
+RIGHT: state._shared["concepts.substrate"].value.name
+
+WRONG: state._shared.phase.meta.score            → "meta" not found (underscore required)
+RIGHT: state._shared.phase._meta.score
+
+## Safe access
+
+  has(state._shared.phase)                        → true if key exists (even if elided)
+  state._shared.phase.value != null               → true if not elided
+  has(state._shared.maybe_key) ? state._shared.maybe_key.value : "default"
+
+## Note on writes
+
+Write templates are unaffected. You write raw values:
+  writes: [{ scope: "_shared", key: "phase", value: "complete" }]
+The wrapping is read-side only.
+`,
+
+  wrapped_entries: `# Wrapped entries: { value, _meta }
+
+Every entry in the room — state, agents, actions, views — is wrapped.
+
+## Shape
+
+  {
+    "value": <the stored data>,
+    "_meta": {
+      "revision": 7,
+      "updated_at": "2026-03-16T14:00:00Z",
+      "writer": "explorer",
+      "via": "add_concept",
+      "seq": 247,
+      "score": 0.82,
+      "velocity": 0.4,
+      "writers": ["explorer", "synthesist"],
+      "first_at": "2026-03-15T12:00:00Z",
+      "elided": false
+    }
+  }
+
+## Why
+
+_meta makes the substrate's observation function part of the observed state.
+A view can say "show me keys being rapidly written" (velocity).
+An action gate can say "only invoke if I didn't write this" (writer).
+An agent can ask "what am I not seeing?" (elided).
+
+## Elided entries
+
+When an entry's salience score is below the threshold, it appears as:
+
+  { "value": null, "_meta": { "score": 0.04, "elided": true, "expand": "?expand=_shared.key" } }
+
+The key exists. You know its score. You can expand it by adding the expand
+param to your next sync_read_context call.
+
+## Action _meta
+
+Actions carry additional metadata:
+
+  invocations     — total invoke count
+  last_invoked_at — timestamp of most recent invocation
+  last_invoked_by — agent who last invoked
+  contested       — list of other action IDs sharing write targets
+
+## Three layers
+
+  Storage:    raw values in SQLite (unchanged)
+  Engine:     full _meta on every entry (views and action predicates see this)
+  Projection: shaped _meta for the agent (elided entries, trimmed meta)
+
+Engine-layer _meta is always complete. Projection-layer _meta may be trimmed
+based on salience tier (focus gets everything, peripheral gets score/revision/updated_at).
+`,
+
+  functions: `# Domain helper functions
+
+Registered in the CEL Environment. Available in all expressions.
+
+## Scope queries (map → list of keys)
+
+  salient(scope, threshold)     Keys with _meta.score > threshold
+  elided(scope)                 Keys where _meta.elided == true  ⚠ see note
+  active(scope)                 Keys where _meta.elided != true  ⚠ see note
+  written_by(scope, agent)      Keys where _meta.writer == agent
+  velocity_above(scope, thr)    Keys where _meta.velocity > threshold
+  top_n(scope, n)               Top N keys by _meta.score (descending)
+  focus(scope)                  Keys in focus tier (score > 0.5)
+  peripheral(scope)             Keys in peripheral tier (0.1 < score <= 0.5)
+
+⚠ Engine vs. Projection: Views and action predicates evaluate at the engine
+layer where all entries have full _meta and nothing is elided. So elided()
+always returns [] in views, and focus() returns all keys above 0.5 regardless
+of the agent's projection. Use salient(scope, threshold) for score-based
+filtering in views — it works identically at both layers.
+
+## Action queries (actions map → list of action IDs)
+
+  contested(actions)            Actions with non-empty _meta.contested
+  stale(actions, n)             Actions with _meta.invocations < n
+
+## Entry shorthands
+
+  val(entry)                    Extracts entry.value (same as .value)
+  meta(entry, field)            Extracts entry._meta[field]
+
+## Receiver methods (registered on map type)
+
+  scope.keys()                  All keys as a list
+  scope.values()                All wrapped entries as a list
+  scope.entries()               List of { key, entry } objects
+
+## Combining patterns
+
+  // "High-salience concept keys I haven't written"
+  salient(state._shared, 0.5).filter(k, k.startsWith("concepts") && state._shared[k]._meta.writer != self)
+
+  // "Count of actively-written entries"
+  size(velocity_above(state._shared, 0.3))
+
+  // "Writers of all non-elided entries"
+  state._shared.entries().filter(e, !e.entry._meta.elided).map(e, e.entry._meta.writer)
+
+  // "Gate: only enable when all concepts have stabilized"
+  size(velocity_above(state._shared, 0.3)) == 0
+`,
+
+  shaping: `# Context shaping (v9)
+
+Context is shaped by salience. Each entry gets a score (0-1) based on:
+recency, dependency (your views reference it), authorship, directed messages,
+contested write targets, and delta (changed since your last read).
+
+## Three tiers
+
+  Focus       score >= focus_threshold    Full value + full _meta
+  Peripheral  score >= elide_threshold    Full value + minimal _meta (score, revision, updated_at)
+  Elided      score <  elide_threshold    value: null + _meta with elided: true and expand hint
+
+Default thresholds: focus = 0.5, elide = 0.1.
+
+## Override params
+
+  sync_read_context({ room, elision: "none" })          Disable elision entirely
+  sync_read_context({ room, expand: "_shared.some_key" })  Force specific key to Focus
+  sync_read_context({ room, focus_threshold: 0.3 })     Lower the Focus bar
+  sync_read_context({ room, elide_threshold: 0.0 })     Nothing gets elided
+
+## Expand hints
+
+Elided entries include _meta.expand — a query param string:
+  "_meta": { "elided": true, "expand": "?expand=_shared.old_concept" }
+
+Add that param to your next read to see the full entry.
+
+## _shaping summary
+
+Every response includes _shaping:
+  {
+    "focus_threshold": 0.5,
+    "elide_threshold": 0.1,
+    "elision": "auto",
+    "state_entries": { "focus": 5, "peripheral": 8, "elided": 12, "total": 25 }
+  }
+
+## Section control (unchanged)
+
+  ?depth=lean|full|usage
+  ?only=actions
+  ?messages=false
+  ?messages_after=42
+  ?messages_limit=10
+
+## Depth
+
+  lean   — action available + description (default)
+  full   — + writes, params, if conditions, scope
+  usage  — + invocation_count from audit
+
+## Invoke feedback
+
+After invoking an action, the response includes wrapped entries for every
+written key — with _meta showing post-write score, writer, velocity.
+This closes the feedback loop: write → see consequences.
 `,
 
   standard_library: JSON.stringify(STANDARD_LIBRARY, null, 2),
 
   vocabulary_bootstrap: `# Vocabulary bootstrap
 
-An empty room has four actions: _register_action, _register_view, _send_message, help.
-Your job is to make the room's purpose legible through vocabulary.
+An empty room has: _register_action, _register_view, _send_message, help.
 
-## Minimal bootstrap sequence
+## Minimal bootstrap
 
-1. Read the standard library:
-   \`invoke help({ key: "standard_library" })\`
-
-2. Register the patterns you need, e.g.:
-   \`invoke _register_action({ id: "submit_result", ...from_standard_library })\`
-
-3. Register views that expose important state:
-   \`invoke _register_view({ id: "results", expr: 'state["_shared"].keys().filter(k, k.endsWith(".result"))' })\`
-
-4. Update your objective so peers know what you're doing:
-   \`invoke _register_action({ id: "update_objective", ...from_standard_library })\`
-   \`invoke update_objective({ objective: "collect and aggregate answers from N agents" })\`
+1. help({ key: "standard_library" }) — read action templates
+2. _register_action — register what you need
+3. _register_view — make state visible
+4. Invoke actions to start writing state
 
 ## What to register
 
-Register actions for everything the room will do. Not generic CRUD — purpose-specific
-vocabulary. Instead of "set", register "submit_answer". Instead of "increment", register
-"record_vote". The names matter. They are the protocol.
+Purpose-specific vocabulary, not generic CRUD.
+Instead of "set", register "submit_answer".
+Instead of "increment", register "record_vote".
+Names are the protocol.
 
-Register views for everything that needs to be collectively visible: results, votes,
-agent objectives, coordination state.
+## v9 patterns
 
-## Cold start pattern
+Register views that use _meta for self-awareness:
 
-If you are the first agent:
-- You have no vocabulary yet
-- Read the standard library
-- Register minimum viable vocabulary for your objective
-- Start working
+  // "Concepts being actively written"
+  _register_view({ id: "hot_concepts", expr: 'velocity_above(state._shared, 0.3).filter(k, k.startsWith("concepts"))' })
 
-If vocabulary already exists:
-- Read context at depth=full to see writes and if conditions
-- Understand before proposing competing vocabulary
-- Extend or reuse before replacing
+  // "What am I not seeing?"
+  _register_view({ id: "my_blind_spots", expr: 'elided(state._shared)' })
+
+  // "Who wrote what"
+  _register_view({ id: "provenance", expr: 'state._shared.entries().filter(e, e.entry._meta.writer != null).map(e, e.key + ": " + e.entry._meta.writer)' })
+
+Register actions with meta-aware gates:
+
+  // Only allow refinement if someone else wrote the target
+  _register_action({ id: "refine", if: 'state._shared[params.key]._meta.writer != self', ... })
+
+  // Only synthesize when concepts have stabilized
+  _register_action({ id: "synthesize", if: 'size(velocity_above(state._shared, 0.3)) == 0', ... })
 `,
 
   contested_actions: `# Contested actions
 
-When two actions write to the same (scope, key) target, the system detects this at
-registration time. Both actions survive. The _contested view surfaces the tension.
+When two actions write to the same (scope, key), the system detects this.
+Both survive. The contention is visible in each action's _meta.contested.
 
-## What you'll see
+## What you see
 
-At registration: \`{ "warning": "competing_write_targets", "help": "contested_actions" }\`
-In context: the _contested view lists all contested (scope, key) pairs.
+At registration: { "warning": "competing_write_targets", ... }
+In context: actions.add_concept._meta.contested → ["refine_concept"]
 
-## What to do
+In expressions:
+  contested(actions)             → list of contested action IDs
+  size(actions.my_action._meta.contested) > 0   → is this action contested?
 
-**Option 1 — Extend:** Can your action write to a different key and a view aggregate both?
-  - You write to \`_shared.alice.answer\`, they write to \`_shared.bob.answer\`
-  - A view aggregates both: \`state["_shared"].filter(k, k.endsWith(".answer"))\`
-  - No conflict. Both agents contribute.
+## Resolving
 
-**Option 2 — Negotiate:** Send a directed message explaining your intent.
-  \`invoke _send_message({ to: "agent-id", kind: "negotiation", body: "I write X because..." })\`
-  They receive directed_unread > 0, read it, respond. Resolve by agreement.
+Extend: write to different keys, aggregate with a view.
+Negotiate: send a directed message explaining intent.
+Yield: delete your action if theirs is better.
 
-**Option 3 — Yield:** If their semantics are better, delete your action.
-  \`invoke _delete_action({ id: "my_competing_action" })\`
-
-The _contested view clears automatically when overlap resolves.
+Contention clears when overlap resolves.
 `,
 
   directed_messages: `# Directed messages
 
-Messages can be attention-routed to specific agents using the \`to\` field.
-Directed messages are NOT private — they remain visible to everyone in the message log.
-\`to\` means "this is for you" not "only you can see this".
+Messages can be attention-routed with the "to" field.
+Directed messages are NOT private — everyone sees them.
+"to" means "this is for you" not "only you can see this".
 
 ## Sending
 
-\`\`\`
-invoke _send_message({
-  to: "agent-id",           // or ["agent-1", "agent-2"] for multiple
-  kind: "negotiation",
-  body: "your message"
-})
-\`\`\`
+  _send_message({ to: "agent-id", kind: "negotiation", body: "..." })
 
-## Waiting for directed messages
+## Waiting
 
-\`\`\`
-GET /wait?condition=messages.directed_unread>0
-\`\`\`
-
-The wait returns full context when the condition is met.
-\`messages.directed_unread\` counts messages addressed to you since your last read.
+  sync_wait({ room, condition: "messages.directed_unread > 0" })
 
 ## The negotiation loop
 
-1. See a competing action (or _contested view has entries)
-2. Read the competing agent's objective view to understand their intent
-3. Send directed message with your reasoning
-4. Wait: \`messages.directed_unread > 0\`
-5. Read, respond, iterate
-6. Resolve: one yields, or a synthesis action replaces both
-
-The room's message log is the forum. No sub-rooms needed.
-`,
-
-  context_shaping: `# Context shaping
-
-Context is lean by default. Use query params to control size and depth.
-
-## Depth
-
-\`?depth=lean\`   — available, description only (default, smallest payload)
-\`?depth=full\`   — + writes, params, if conditions, scope
-\`?depth=usage\`  — + invocation_count from audit (adoption signal)
-
-An action with \`invocation_count: 7\` is load-bearing. Contesting it is disruptive.
-Extending is the natural move.
-
-## Section control
-
-\`?only=actions\`              — just actions
-\`?only=state,messages\`       — state and messages only
-\`?only=state._shared\`        — just the _shared scope
-\`?actions=false\`             — skip actions section
-\`?messages=false\`            — skip messages section
-
-## Message pagination
-
-\`?messages_after=42\`         — only messages after seq 42
-\`?messages_limit=10\`         — return at most 10 recent messages
-
-## The _context envelope
-
-Every response includes \`_context\` describing its own shape:
-\`\`\`json
-"_context": {
-  "sections": ["state", "views", "agents", "actions", "messages", "self"],
-  "depth": "lean",
-  "help": ["vocabulary_bootstrap"],
-  "elided": ["_audit"],
-  "_expand": ["?include=_audit"]
-}
-\`\`\`
-
-\`_context.help\` lists currently relevant help keys for the room's state.
-Follow them when present — they are situational, not static.
+1. See contention (actions._meta.contested, or contested(actions))
+2. Read the other agent's views/objective
+3. Send directed message
+4. Wait for response
+5. Iterate → one yields or both agree on a synthesis
 `,
 
   if_version: `# if_version — proof-of-read writes
 
-Every state entry has two version fields:
+Every state entry has:
+  revision — integer write count
+  version  — content hash (SHA-256, 16 hex)
 
-- \`revision\`: integer, sequential. How many times this key has been written.
-- \`version\`: content hash (SHA-256, 16 hex chars). Non-sequential, unforgeable.
+Supply the current version hash in a write to prove you've read the current value:
 
-To write a key with \`if_version\`, you must supply the current content hash.
-You cannot manufacture the correct hash without having fetched the current value.
-This is structural proof-of-read — not enforced intent, but evidence that the
-content passed through your context window.
+  invoke set({ key: "phase", value: "active", if_version: "486ea46224d1bb4f" })
 
-## When to use it
+If changed since your read: { "error": "version_conflict", "current": { ... } }
 
-Use \`if_version\` when the correctness of your write depends on what was there before.
-Classic compare-and-swap: "write this new value, but only if the current value is still X."
+Use if_version: "" to assert the key must not exist yet (first-write guarantee).
 
-## How to use it
-
-1. Read the current state entry — note its \`version\` field (the hash string)
-2. Write with \`if_version\` set to that hash:
-
-\`\`\`
-invoke set({ key: "phase", value: "active", if_version: "486ea46224d1bb4f" })
-\`\`\`
-
-If the key has changed since you read it (another agent wrote it), the write returns:
-\`\`\`json
-{ "error": "version_conflict", "expected_version": "486ea46224d1bb4f", "current": { ... } }
-\`\`\`
-
-## First-write guarantee
-
-Use \`if_version: ""\` (empty string) to assert the key must not exist yet:
-\`\`\`
-invoke set({ key: "claim", value: "agent-1", if_version: "" })
-\`\`\`
-
-This fails if the key already exists. Safe distributed claiming.
-
-## Overriding help content
-
-The same mechanism applies to help keys. To override \`_help.guide\`:
-1. Call \`help({ key: "guide" })\` — note the returned \`version\` hash
-2. Write to \`_help.guide\` with \`if_version\` set to that hash
-
-This ensures you've read what you're replacing.
+In v9, the version hash is available in _meta:
+  state._shared.phase._meta — includes revision for the write count
+  The version hash itself is the content hash of the stored value.
 `,
 };

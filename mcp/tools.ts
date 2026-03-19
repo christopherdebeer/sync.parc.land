@@ -94,8 +94,8 @@ This is observation — no agent presence is created.`,
 
       const rooms = [];
       for (const ur of userRooms) {
-        // Check scope allows this room
-        if (ctx.scope && ctx.scope.rooms.size > 0) {
+        // Check scope allows this room — wildcard grants access to all
+        if (ctx.scope && ctx.scope.rooms.size > 0 && !ctx.scope.wildcardRooms) {
           if (!ctx.scope.rooms.has(ur.roomId)) continue;
         }
 
@@ -536,18 +536,28 @@ Returns: Agent object with { id, token, room_id, ... }`,
   {
     name: "sync_read_context",
     title: "Read Context",
-    description: `THE primary read operation. Returns the full room context.
+    description: `THE primary read operation. Returns the room context with wrapped entries.
 
-If embodied in this room, reads as the embodied agent (full scope, heartbeat ticks).
-If not embodied, reads as observer (view-level, no presence).
-Includes _session metadata with switchable agents.
+Every entry is { value, _meta: { score, revision, writer, via, velocity, ... } }.
+Entries are shaped by salience: high-score entries get full value + full _meta,
+low-score entries are elided (value: null, _meta.elided: true, _meta.expand: "...").
+
+Use .value to access stored data, ._meta for provenance/trajectory/salience.
+Domain helpers: salient(), elided(), written_by(), focus(), keys(), entries().
+
+If embodied: reads as agent (full scope, heartbeat). If not: observer (view-level).
 
 Args:
   - room (string, required): Room ID.
   - token (string, optional): Auth token (legacy — prefer OAuth + embodiment).
-  - depth, only, actions, messages, messages_after, messages_limit, include, compact.
+  - depth: "lean" | "full" | "usage" — action detail level.
+  - expand: comma-separated keys to force into Focus tier (e.g. "_shared.key1").
+  - elision: "none" to disable elision entirely (return everything).
+  - focus_threshold: score above which entries get full _meta (default: 0.5).
+  - elide_threshold: score below which values are null (default: 0.1).
+  - only, actions, messages, messages_after, messages_limit, include.
 
-Returns: { state, views, agents, actions, messages, self, _context, _session }`,
+Returns: { state, views, agents, actions, messages, self, _shaping }`,
     inputSchema: {
       type: "object",
       properties: {
@@ -560,7 +570,10 @@ Returns: { state, views, agents, actions, messages, self, _context, _session }`,
         messages_after: { type: "number" },
         messages_limit: { type: "number" },
         include: { type: "string" },
-        compact: { type: "boolean" },
+        expand: { type: "string", description: "Comma-separated keys to force into Focus tier" },
+        elision: { type: "string", enum: ["none", "auto"], description: "Set to 'none' to disable elision" },
+        focus_threshold: { type: "number", description: "Score threshold for full _meta (default: 0.5)" },
+        elide_threshold: { type: "number", description: "Score threshold below which values are elided (default: 0.1)" },
       },
       required: ["room"],
     },
@@ -569,7 +582,7 @@ Returns: { state, views, agents, actions, messages, self, _context, _session }`,
       await ensureMigrated();
       const roomId = params.room as string;
 
-      // Build ContextRequest
+      // Build ContextRequest with v9 shaping params
       const ctxReq: ContextRequest = {};
       if (params.depth) ctxReq.depth = params.depth as "lean" | "full" | "usage";
       if (params.only) ctxReq.only = (params.only as string).split(",").map(s => s.trim());
@@ -578,6 +591,11 @@ Returns: { state, views, agents, actions, messages, self, _context, _session }`,
       if (params.messages_after !== undefined) ctxReq.messagesAfter = params.messages_after as number;
       if (params.messages_limit !== undefined) ctxReq.messagesLimit = params.messages_limit as number;
       if (params.include) ctxReq.include = (params.include as string).split(",").map(s => s.trim());
+      // v9 shaping
+      if (params.expand) ctxReq.expand = (params.expand as string).split(",").map(s => s.trim());
+      if (params.elision) ctxReq.elision = params.elision as "none" | "auto";
+      if (params.focus_threshold !== undefined) ctxReq.focusThreshold = params.focus_threshold as number;
+      if (params.elide_threshold !== undefined) ctxReq.elideThreshold = params.elide_threshold as number;
 
       // New path: session-aware resolution
       if (ctx.resolveForRoom) {
@@ -600,6 +618,8 @@ Returns: { state, views, agents, actions, messages, self, _context, _session }`,
     description: `THE primary write operation. Invoke any action (built-in or custom) in a room.
 
 Requires embodiment — call sync_embody first if not yet embodied.
+Returns wrapped entries for written keys with _meta (score, writer, velocity,
+contested) so the agent sees the structural consequences of its action.
 
 Args:
   - room (string, required): Room ID.
@@ -607,7 +627,7 @@ Args:
   - action (string, required): Action ID to invoke.
   - params (object, optional): Parameters for the action.
 
-Returns: { invoked, action, agent, params, writes, result? }`,
+Returns: { invoked, action, agent, params, writes: [{ scope, key, value, _meta }], result? }`,
     inputSchema: {
       type: "object",
       properties: {
