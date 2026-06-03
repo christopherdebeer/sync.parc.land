@@ -96,7 +96,9 @@ export async function joinRoom(roomId: string, body: any, req: Request) {
       });
       if (body.public_keys?.includes(key)) {
         const viewId = `${id}.${key}`;
-        const expr = `state["${id}"]["${key}"]`;
+        // v9 wrapped state: state[scope][key] is { value, _meta }; project the
+        // bare value so the public view exposes the data, not the wrapper.
+        const expr = `state["${id}"]["${key}"].value`;
         const viewDef = JSON.stringify({
           expr, description: `auto: ${id}.${key}`, scope: id,
           registered_by: id, deps: [], render: null, enabled: null, timer: null,
@@ -219,7 +221,9 @@ export async function insertAgentDirect(
       });
       if (params.publicKeys?.includes(key)) {
         const viewId = `${id}.${key}`;
-        const expr = `state["${id}"]["${key}"]`;
+        // v9 wrapped state: state[scope][key] is { value, _meta }; project the
+        // bare value so the public view exposes the data, not the wrapper.
+        const expr = `state["${id}"]["${key}"].value`;
         const viewDef = JSON.stringify({
           expr, description: `auto: ${id}.${key}`, scope: id,
           registered_by: id, deps: [], render: null, enabled: null, timer: null,
