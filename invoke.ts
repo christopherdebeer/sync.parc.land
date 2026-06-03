@@ -194,12 +194,26 @@ export async function invokeAction(roomId: string, actionId: string, body: any, 
       });
     }
 
-    // Scope enforcement via registrar-identity bridging
-    if (writeScope !== "_shared" && !writeScope.startsWith("_")) {
-      const registrarAllowed = actionScope === writeScope;
-      const invokerAllowed = agent === writeScope;
-      if (!registrarAllowed && !invokerAllowed) {
-        return json({ error: "scope_denied", message: `action "${actionId}" cannot write to scope "${writeScope}"` }, 403);
+    // Scope enforcement via registrar-identity bridging.
+    // `_shared` is the open shared scope. All other reserved (`_`-prefixed)
+    // scopes are framework-managed (`_agents`, `_actions`, `_views`, `_audit`,
+    // `_messages`, `_config`, …) and must NOT be writable by an ordinary
+    // custom-action invocation — otherwise an agent could self-grant authority
+    // by writing `_agents`, forge/erase `_audit` entries, or redefine other
+    // agents' `_actions`/`_views`. Only an invoker holding admin ("*") authority
+    // may write a reserved scope via a custom action. (Built-in actions, which
+    // legitimately write these scopes, dispatch before this loop.)
+    if (writeScope !== "_shared") {
+      if (writeScope.startsWith("_")) {
+        if (!auth.grants?.includes("*")) {
+          return json({ error: "scope_denied", message: `action "${actionId}" cannot write to reserved scope "${writeScope}"` }, 403);
+        }
+      } else {
+        const registrarAllowed = actionScope === writeScope;
+        const invokerAllowed = agent === writeScope;
+        if (!registrarAllowed && !invokerAllowed) {
+          return json({ error: "scope_denied", message: `action "${actionId}" cannot write to scope "${writeScope}"` }, 403);
+        }
       }
     }
 

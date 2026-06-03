@@ -128,10 +128,23 @@ export default async function (req: Request) {
   const url = new URL(req.url);
   const compact = url.searchParams.get("compact") === "true";
 
-  const response = await route(req, url);
+  let response = await route(req, url);
 
-  // v8: Add version header to every response for debugging stale isolates
-  response.headers.set("X-Sync-Version", "v9");
+  // v8: Add version header to every response for debugging stale isolates.
+  // Some responses (redirects, 304s) carry immutable headers, so fall back to
+  // rebuilding the response with a mutable header copy instead of throwing an
+  // uncaught "headers are immutable" TypeError after the response is sent.
+  try {
+    response.headers.set("X-Sync-Version", "v9");
+  } catch {
+    const headers = new Headers(response.headers);
+    headers.set("X-Sync-Version", "v9");
+    response = new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
 
   if (compact && response.headers.get("Content-Type")?.includes("json")) {
     const data = await response.json();
