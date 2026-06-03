@@ -1,7 +1,12 @@
 # Views Reference
 
 Views are CEL expressions that project state into named values visible to all agents.
-They are the read half of the v6 contract — symmetric with actions as the write half.
+They are the read half of the v9 contract — symmetric with actions as the write half.
+
+> **v9 wrapped state.** State entries are `{ value, _meta }`. View expressions
+> read them via `.value` / `._meta` (e.g. `state["_shared"]["phase"].value`).
+> Views themselves resolve to **raw** values (not wrapped) — what a view computes
+> is what appears in `views.*` and on surfaces.
 
 ---
 
@@ -60,13 +65,13 @@ A view's `scope` determines which private state it can read during evaluation.
 {
   "id": "alice.health",
   "scope": "alice",
-  "expr": "state[\"alice\"][\"health\"]"
+  "expr": "state[\"alice\"][\"health\"].value"
 }
 ```
 
 This view is registered with `scope: "alice"`. Only an agent with identity `alice`
 (or room-token authority) may register it. At evaluation time, the system augments
-the CEL context with `alice`'s private scope, so `state["alice"]["health"]` resolves.
+the CEL context with `alice`'s private scope, so `state["alice"]["health"].value` resolves.
 The result is visible to everyone. The raw scope is not.
 
 **The pattern:** private state → view → public projection. No other read-sharing mechanism needed.
@@ -78,13 +83,17 @@ The result is visible to everyone. The raw scope is not.
 Views see the full room context:
 
 ```
-state._shared.*           shared state
+state._shared.*           shared state — each entry is { value, _meta }
 state["agent-id"].*       registrar's private scope (if scope != "_shared")
-views.*                   all other resolved views (evaluated before this one)
-agents.*                  agent presence
+views.*                   all other resolved views (raw values, evaluated before this one)
+agents.*                  agent presence (wrapped: agents[id].value)
 messages.count / .unread / .directed_unread
 self                      evaluating agent's ID (may be empty for system evaluation)
 ```
+
+State and agent entries are wrapped — read with `.value` / `._meta`. Domain
+helpers (`salient`, `written_by`, `velocity_above`, `top_n`, `.keys()`,
+`.entries()`) operate on wrapped scopes. See `reference/cel.md`.
 
 **View order:** Views are evaluated in registration order. A view can reference the
 resolved value of a previously registered view via `views["earlier-view"]`.
@@ -96,8 +105,8 @@ resolved value of a previously registered view via `views["earlier-view"]`.
 ```json
 {
   "id": "final-score",
-  "expr": "state[\"_shared\"][\"score\"]",
-  "enabled": "state[\"_shared\"][\"phase\"] == \"complete\""
+  "expr": "state[\"_shared\"][\"score\"].value",
+  "enabled": "state[\"_shared\"][\"phase\"].value == \"complete\""
 }
 ```
 
@@ -116,9 +125,9 @@ A view with a `render` object becomes a **surface** — a UI element rendered by
 ```json
 {
   "id": "score-display",
-  "expr": "state[\"_shared\"][\"score\"]",
+  "expr": "state[\"_shared\"][\"score\"].value",
   "render": { "type": "metric", "label": "Score", "unit": "pts" },
-  "enabled": "state[\"_shared\"][\"phase\"] == \"active\""
+  "enabled": "state[\"_shared\"][\"phase\"].value == \"active\""
 }
 ```
 
@@ -177,6 +186,23 @@ Tabular data from an array of objects.
 ```
 
 View expr returns an array of objects. `columns` specifies which keys to show and in what order.
+
+---
+
+### `array-table`
+
+Tabular data from an array of objects, with column hints and an optional row cap.
+
+```json
+{ "type": "array-table", "label": "Submissions",
+  "columns": [{ "key": "agent" }, { "key": "answer" }, { "key": "score" }],
+  "max_rows": 50 }
+```
+
+View expr returns an array of objects. `columns` is a list of column hints
+(each with a `key`, and optionally a label/format); `max_rows` caps how many
+rows render. Distinct from `view-table` in that it takes structured column hint
+objects rather than a flat list of key names.
 
 ---
 
@@ -256,27 +282,33 @@ their own `expr` — the view expr is ignored if `render.type` is `"section"`.
 
 ---
 
-## Synthetic system views
+## Contention is on `_meta`, not a synthetic view
 
-The runtime injects synthetic views under reserved IDs. These appear in the `views`
-section of context with `system: true`. They cannot be registered or deleted manually.
+Earlier versions injected synthetic `_contested` / `_salience` views under
+reserved IDs. **Those are gone in v9.** Contention and salience are now fields on
+each entry's `_meta`, queryable directly in any view or predicate.
 
-### `_contested`
+When two or more actions write to the same `(scope, key)` target, each action's
+`_meta.contested` lists the competing action IDs:
 
-Present when two or more actions write to the same `(scope, key)` target.
+```cel
+actions.alice_submit._meta.contested   // → ["bob_submit"]
+contested(actions)                      // → all contested action IDs
+```
+
+Salience lives on `_meta.score` / `_meta.velocity`. To build a view over
+contested actions or hot keys, write a normal view that reads these fields:
 
 ```json
-"_contested": {
-  "value": {
-    "_shared:answer": ["alice_submit", "bob_submit"]
-  },
-  "description": "Write targets contested by 2+ actions.",
-  "system": true
+{
+  "id": "contested-actions",
+  "expr": "contested(actions)",
+  "description": "Actions sharing a write target"
 }
 ```
 
-Clears automatically when the overlap resolves (action deleted or writes retargeted).
-Use as a wait condition: `views["_contested"].size() > 0`.
+Use as a wait condition: `views["contested-actions"].size() > 0`, or wait on the
+`_meta` field directly: `size(actions.alice_submit._meta.contested) > 0`.
 
 ---
 
@@ -300,21 +332,24 @@ Views support the same timer syntax as actions and state entries.
 
 ## The three ways to create views
 
-**1. At agent join:**
+**1. At agent join (inline views):**
 
 ```json
 POST /rooms/:id/agents
-{ "views": [{ "id": "alice-status", "expr": "state[\"alice\"][\"status\"]", "scope": "alice" }] }
+{ "views": [{ "id": "alice-status", "expr": "state[\"alice\"][\"status\"].value", "scope": "alice" }] }
 ```
 
-**2. Auto-view from state write:**
+**2. At agent join (`public_keys` auto-views):**
 
 ```json
-POST /rooms/:id/actions/_set_state/invoke
-{ "params": { "key": "health", "value": 85, "public": true } }
+POST /rooms/:id/agents
+{ "id": "alice", "state": { "health": 85 }, "public_keys": ["health"] }
 ```
 
-Creates `alice.health` view automatically, scoped to the writing agent.
+Each key listed in `public_keys` gets an auto-created view (e.g. `alice.health`)
+scoped to the joining agent, projecting that private key's value publicly. This
+is the only auto-view mechanism — **there is no `_set_state` action** and no
+`"public": true` write flag. All other writes go through registered actions.
 
 **3. Via `_register_view` action (or directly):**
 

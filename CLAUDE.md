@@ -28,17 +28,26 @@ This means README.md must:
 When editing README.md, you are editing the skill definition that other Claude
 instances will read to learn how to use this platform. Write for that audience.
 
-## v6 architecture (context-first, vocabulary-first)
+## v9 architecture (context-first, vocabulary-first, wrapped-state)
 
-Two operations: **read context**, **invoke actions**. Two axioms:
-`_register_action` (declare write capability), `_register_view` (declare read capability).
+The server stamps `X-Sync-Version: v9`. Two operations: **read context**,
+**invoke actions**. Two axioms: `_register_action` (declare write capability),
+`_register_view` (declare read capability).
 
 - `GET /context` — returns everything (state, views, agents, actions with defs, messages with bodies)
 - `POST /actions/:id/invoke` — the only write endpoint (builtin and custom actions)
 - `GET /wait` — blocks until condition, returns full context
 
-10 total endpoints. Every write flows through action invocation.
+There are ~45 HTTP routes in `main.ts` plus ~18 MCP/OAuth routes (60+ total) —
+this is not a 10-endpoint surface. Every write flows through action invocation.
 Every invocation is logged to `_audit` scope.
+
+**Wrapped state (v9):** Every state entry is `{ value, _meta }`. CEL expressions
+access `.value` for the data and `._meta` for metadata (`revision`, `updated_at`,
+`writer`, `via`, `seq`, `score`, `velocity`, `writers`, `first_at`, `elided`).
+So `state._shared.phase.value == "playing"`, not the old flat
+`state._shared.phase == "playing"`. The `val()` / `meta()` helpers extract these.
+Context is shaped by salience: low-score entries are elided (`value: null`).
 
 There is no `_set_state`. Agents declare write capabilities as actions, then invoke them.
 The standard library (`help({ key: "standard_library" })`) provides ready-to-register
@@ -52,7 +61,7 @@ auth.ts          — Token generation, hashing, scope authority checks
 cel.ts           — CEL context builder, expression evaluation, view context
 schema.ts        — SQLite schema and migrations
 timers.ts        — Wall-clock and logical-clock timer lifecycle
-mcp/             — MCP server (OAuth 2.1 + WebAuthn + token vault + 16 tools)
+mcp/             — MCP server (OAuth 2.1 + WebAuthn + token vault + 18 tools)
 frontend/        — React SPA (SSR + hydration: landing, dashboard, docs, auth pages)
 README.md        — Skill definition (served at root as SKILL.md)
 reference/       — Detailed docs (api.md, cel.md, examples.md, views.md, help.md, v6.md)
@@ -66,22 +75,22 @@ The Audit tab shows every action invocation with success/failure status.
 
 ## Surfaces (views with render hints)
 
-In v6, surfaces are views with a `render` hint — no separate `_dashboard`
+In v9, surfaces are views with a `render` hint — no separate `_dashboard`
 config blob required. Register a view with `render: { type: "metric", label: "Score" }`
 and the dashboard renders it automatically.
 
 Key files:
 
 - `frontend/types.ts` — Surface type definitions and `DashboardConfig` interface
-- `frontend/components/panels/Surfaces.tsx` — Renderer for all 10 surface types
+- `frontend/components/panels/Surfaces.tsx` — Renderer for all 11 surface types
 - `frontend/components/Dashboard.tsx` — Renders views with `render` defined,
   falls back to classic tab mode when no surfaces exist
 - `reference/views.md` — Views reference including render hints
 
 ### Surface types
 
-`markdown`, `metric`, `view-grid`, `view-table`, `action-bar`, `action-form`,
-`action-choice`, `feed`, `watch`, `section` (nesting container).
+`markdown`, `metric`, `view-grid`, `view-table`, `array-table`, `action-bar`,
+`action-form`, `action-choice`, `feed`, `watch`, `section` (nesting container).
 
 All defined in `types.ts` as a discriminated union on the `type` field.
 

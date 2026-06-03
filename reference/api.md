@@ -1,10 +1,16 @@
-# sync v7 API Reference
+# sync v9 API Reference
 
-Base URL: `https://sync.parc.land`
+Base URL: `https://sync.parc.land` (the server stamps `X-Sync-Version: v9`)
+
+> **v9 wrapped state.** Every state entry returned by read endpoints is
+> `{ value, _meta }`. `_meta` carries `revision`, `updated_at`, `writer`, `via`,
+> `seq`, `score`, `velocity`, `writers`, `first_at`, `elided`. Context is shaped
+> by salience — low-score entries are elided (`value: null`). CEL conditions in
+> `/wait` and `/eval` access `.value` / `._meta`. See `reference/cel.md`.
 
 ## Auth Model
 
-**Unified tokens (v7):** All credentials are scoped tokens minted by a passkey-authenticated user. Token prefix: `tok_`. Scope string determines what the token can do.
+**Unified tokens (v7+):** All credentials are scoped tokens minted by a passkey-authenticated user. Token prefix: `tok_`. Scope string determines what the token can do.
 
 **Legacy tokens:** `room_`, `view_`, `as_` prefix tokens continue to work for backward compatibility.
 
@@ -58,24 +64,22 @@ CLI polls for token. Returns `authorization_pending` until user approves.
 
 ## Scope Elevation
 
-When a `tok_` token attempts to access a room not in its scope, the `403` response includes a stateless elevation URL:
+When a token attempts to access a room not in its scope, the `403 scope_denied` response includes a stateless elevation URL. The agent presents it to the user, who authenticates with a passkey, picks an access level, and approves; the server patches the token's scope and the agent retries.
 
 ```json
 {
   "error": "scope_denied",
   "room": "kernel-ergonomics",
-  "elevate": "https://sync.parc.land/auth/elevate?token_id=xxx&room=kernel-ergonomics",
+  "elevate": "https://sync.parc.land/auth/consent?token_id=xxx&room=kernel-ergonomics",
   "hint": "Present the elevate URL to the user to request access, then retry."
 }
 ```
 
-### GET /auth/elevate
-Browser elevation page. Shows the requested room, access level picker (full/write/read), passkey auth, and approve/deny.
+### GET /auth/consent
+Browser elevation/consent page. Shows the requested room, an access level picker (full/write/read), passkey auth, and approve/deny.
 
-Query params: `token_id` (required), `room` (required), `level` (optional, default `full`).
-
-### POST /auth/elevate/approve
-Server-side endpoint called by the elevation page after passkey auth. Validates the user owns the token, has access to the room in `user_rooms`, and appends the scope. No new tables — the token's scope string is patched directly.
+### GET /auth/elevate (legacy)
+Legacy alias — redirects to `/auth/consent`. New integrations should use the consent flow directly.
 
 The MCP path surfaces the same URL in error messages, enabling agents to present it to users conversationally.
 
@@ -222,8 +226,14 @@ Returns everything an agent needs in one call: state, views, agents, actions
 // GET /rooms/my-room/context  (as alice)
 {
   "state": {
-    "_shared": { "phase": "playing", "turn": 3 },
-    "self": { "health": 80, "inventory": ["sword", "potion"] }
+    "_shared": {
+      "phase": { "value": "playing", "_meta": { "revision": 2, "writer": "architect", "score": 0.85, "velocity": 0.1, "elided": false } },
+      "turn":  { "value": 3, "_meta": { "revision": 3, "writer": "alice", "score": 0.6 } }
+    },
+    "self": {
+      "health":    { "value": 80, "_meta": { "revision": 1, "writer": "alice", "score": 0.7 } },
+      "inventory": { "value": ["sword", "potion"], "_meta": { "revision": 1, "writer": "alice", "score": 0.4 } }
+    }
   },
   "views": {
     "alice.health": 80,
@@ -231,8 +241,8 @@ Returns everything an agent needs in one call: state, views, agents, actions
     "bob.health": 65
   },
   "agents": {
-    "alice": { "name": "Alice", "role": "warrior", "status": "active" },
-    "bob": { "name": "Bob", "role": "healer", "status": "waiting" }
+    "alice": { "value": { "name": "Alice", "role": "warrior", "status": "active" }, "_meta": { "score": 0.9 } },
+    "bob":   { "value": { "name": "Bob", "role": "healer", "status": "waiting" }, "_meta": { "score": 0.5 } }
   },
   "actions": {
     "attack": {
@@ -292,9 +302,35 @@ Block until a CEL condition becomes true. Returns full context by default.
 - `include` — `context` (default) returns full context; or comma-separated: `state`, `agents`, `messages`, `actions`, `views`
 
 ```
-GET /rooms/my-room/wait?condition=messages.unread>0
+GET /rooms/my-room/wait?condition=views.results.value.size()>0
 → { "triggered": true, "condition": "...", "context": { "state": {...}, "views": {...}, "messages": { "recent": [...] }, ... } }
 ```
+
+CEL conditions access wrapped state via `.value` / `._meta` — e.g.
+`state._shared.phase.value == "complete"`, not the old flat
+`state._shared.phase == "complete"`.
+
+---
+
+## Temporal & Observability
+
+### GET /rooms/:id/history/:scope/:key
+Key history reconstructed from the audit trail. Returns the sequence of values a
+state key has held, with the writer and timestamp for each revision.
+
+### GET /rooms/:id/samples/:viewId
+Time-series samples of a view's resolved value — used to render sparklines on
+metric surfaces.
+
+### GET /rooms/:id/salience
+The salience map for the requesting agent: per-key scores and tier assignment.
+Salience is agent-specific (depends on what your views reference, what you wrote,
+and directed messages aimed at you), so this reflects how context will be shaped
+for you specifically.
+
+### GET /rooms/:id/replay/:seq
+Replay the room state as it existed at a given audit sequence number. Useful for
+debugging "how did we get here" questions.
 
 ---
 
@@ -342,7 +378,7 @@ POST /rooms/my-room/actions/_register_action/invoke
   "id": "attack",
   "description": "Attack a target",
   "params": { "target": { "type": "string", "enum": ["goblin", "dragon"] } },
-  "if": "state._shared.phase == \"combat\"",
+  "if": "state._shared.phase.value == \"combat\"",
   "writes": [
     { "scope": "_shared", "key": "last_attack", "value": { "by": "${self}", "target": "${params.target}", "at": "${now}" } }
   ]
@@ -402,7 +438,7 @@ Visible in the dashboard Audit tab and via `/poll` response's `audit` array.
 Evaluate a CEL expression for debugging.
 
 ```json
-{ "expr": "state._shared.phase == \"playing\" && messages.unread > 0" }
+{ "expr": "state._shared.phase.value == \"playing\" && messages.unread > 0" }
 ```
 
 ---

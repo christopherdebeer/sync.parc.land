@@ -1,8 +1,14 @@
-# sync v6 Examples
+# sync v9 Examples
 
-All writes use `POST /actions/:id/invoke`. All reads use `GET /context`.
+All writes use `POST /rooms/:id/actions/:id/invoke`. All reads use `GET /rooms/:id/context`.
 There is no `_set_state` — agents register actions with write templates, then invoke them.
 The standard library (`help({ key: "standard_library" })`) provides common patterns.
+
+> **v9 wrapped state.** Read endpoints return entries as `{ value, _meta }`. CEL
+> predicates (`if`, `enabled`, `condition`, view `expr`) access `.value` for data
+> and `._meta` for metadata. The examples below use the wrapped form — e.g.
+> `state._shared.phase.value == "playing"`. Writes remain raw (write templates
+> store plain values; the substrate wraps them on read).
 
 ## 1. Basic Setup: Room + Agents + Chat
 
@@ -79,7 +85,7 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
     "id": "claim_task",
     "description": "Claim an unclaimed task",
     "params": {"key": {"type": "string"}},
-    "if": "state._tasks[params.key].claimed_by == null",
+    "if": "state._tasks[params.key].value.claimed_by == null",
     "writes": [{
       "scope": "_tasks", "key": "${params.key}",
       "merge": {"claimed_by": "${self}", "claimed_at": "${now}"}
@@ -148,7 +154,7 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_view/invoke \
   -H "Authorization: Bearer as_alice123..." \
   -d '{"params": {
     "id": "alice-status",
-    "expr": "state[\"alice\"].health > 50 ? \"healthy\" : \"wounded\"",
+    "expr": "state[\"alice\"].health.value > 50 ? \"healthy\" : \"wounded\"",
     "description": "Alice public health status"
   }}'
 
@@ -179,7 +185,7 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
     "id": "take_turn",
     "description": "Execute your turn",
     "params": {"move": {"type": "string", "enum": ["attack", "defend", "heal"]}},
-    "if": "state._shared.current_player == self && state._shared.phase == \"playing\"",
+    "if": "state._shared.current_player.value == self && state._shared.phase.value == \"playing\"",
     "writes": [
       {"scope": "_shared", "key": "last_move", "value": "${params.move}"},
       {"scope": "_shared", "key": "turn", "increment": true, "value": 1}
@@ -199,7 +205,7 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
   }}'
 
 # Agents wait for their turn (blocks, returns full context)
-curl "https://sync.parc.land/rooms/demo/wait?condition=state._shared.current_player==self" \
+curl "https://sync.parc.land/rooms/demo/wait?condition=state._shared.current_player.value==self" \
   -H "Authorization: Bearer as_alice123..."
 # → { "triggered": true, "context": { "state": {...}, "actions": {...}, ... } }
 ```
@@ -236,7 +242,7 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_view/invoke \
   -d '{"params": {
     "id": "game-status",
     "scope": "_shared",
-    "expr": "state._shared.phase == \"playing\" ? \"Game in progress (turn \" + string(state._shared.turn) + \")\" : \"Game over\"",
+    "expr": "state._shared.phase.value == \"playing\" ? \"Game in progress (turn \" + string(state._shared.turn.value) + \")\" : \"Game over\"",
     "description": "Current game status"
   }}'
 
@@ -259,7 +265,7 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
   -d '{"params": {
     "id": "special_attack",
     "description": "Powerful attack with 10s cooldown",
-    "if": "state._shared.phase == \"playing\"",
+    "if": "state._shared.phase.value == \"playing\"",
     "on_invoke": {
       "timer": {"ms": 10000, "effect": "enable"}
     },
@@ -289,7 +295,7 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_action/invoke \
     "params": {"x": {"type": "number"}, "y": {"type": "number"}},
     "writes": [{"scope": "_shared", "key": "final_boss_location",
                 "value": {"x": "${params.x}", "y": "${params.y}"},
-                "enabled": "state._shared.phase == \"endgame\""}]
+                "enabled": "state._shared.phase.value == \"endgame\""}]
   }}'
 
 # Register a view with enabled expression
@@ -297,8 +303,8 @@ curl -X POST https://sync.parc.land/rooms/demo/actions/_register_view/invoke \
   -H "Authorization: Bearer room_abc123..." \
   -d '{"params": {
     "id": "boss-radar",
-    "expr": "state._shared.final_boss_location",
-    "enabled": "state._shared.phase == \"endgame\"",
+    "expr": "state._shared.final_boss_location.value",
+    "enabled": "state._shared.phase.value == \"endgame\"",
     "render": {"type": "metric", "label": "Boss Location"}
   }}'
 ```
@@ -342,7 +348,7 @@ while True:
     # Wait for something to happen (blocks, returns full context)
     r = httpx.get(
         f"{BASE}/rooms/{ROOM}/wait",
-        params={"condition": "messages.unread > 0 || state._shared.phase != \"idle\""},
+        params={"condition": "messages.unread > 0 || state._shared.phase.value != \"idle\""},
         headers=HEADERS, timeout=30
     )
     ctx = r.json().get("context", {})
